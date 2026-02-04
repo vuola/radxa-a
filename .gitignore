@@ -1,0 +1,28 @@
+# VS Code server/cache
+.vscode-server/
+
+# Caches and local state
+.cache/
+.local/share/Trash/
+
+# Secrets and credentials
+.ssh/
+.kube/
+.laravel/.env
+.kube-cron-jobs/secret.yaml
+
+# History and local machine artifacts
+.bash_history
+.mysql_history
+.wget-hsts
+.sudo_as_admin_successful
+
+# Ephemeral logs/state
+.kube-cron-jobs/.timestamp
+.kube-cron-jobs/events.log
+
+# PulseAudio cache
+.config/pulse/
+
+# .NET certificate/CRL cache
+.dotnet/corefx/cryptography/crls/

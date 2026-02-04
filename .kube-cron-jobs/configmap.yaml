@@ -1,0 +1,140 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: web
+  labels:
+    name: web
+---
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: nginx
+  namespace: kube-system
+spec:
+  repo: https://charts.bitnami.com/bitnami
+  chart: nginx
+  targetNamespace: web
+  valuesContent: |-
+    fullnameOverride: "solarsite"
+    namespaceOverride: "web"
+    service:
+      type: ClusterIP
+    ingress:
+      enabled: true
+      selfSigned: true
+      hostname: radxa-a.local
+      annotations:
+        kubernetes.io/ingress.class: "traefik"
+    replicaCount: 1
+    cloneStaticSiteFromGit:
+      enabled: true
+      repository: "https://github.com/vuola/pubsource.git"
+      branch: "main"
+      interval: 15m
+      gitClone:
+        command:
+          - /bin/bash
+          - -ec
+          - |
+            [[ -f "/opt/bitnami/scripts/git/entrypoint.sh" ]] && source "/opt/bitnami/scripts/git/entrypoint.sh"
+            git clone https://github.com/vuola/pubsource.git --branch main /tmp/app
+            [[ "$?" -eq 0 ]] && \
+              shopt -s dotglob && \
+              rm -rf /app/* && \
+              mv /tmp/app/* /app/ && \
+              chmod -R o+rw /app/storage/logs /app/bootstrap/cache /app/storage/framework && \
+              chmod ug+x /app/setup_laravel.sh
+      gitSync:
+        command:
+          - /bin/bash
+          - -ec
+          - |
+            [[ -f "/opt/bitnami/scripts/git/entrypoint.sh" ]] && source "/opt/bitnami/scripts/git/entrypoint.sh"
+            while true; do
+                cd /app && \
+                  git pull origin main && \
+                  chmod -R o+rw /app/storage/logs /app/bootstrap/cache /app/storage/framework && \
+                  chmod ug+x /app/setup_laravel.sh
+                sleep 15m
+            done
+    serverBlock: |-
+      server {
+        listen 0.0.0.0:8080;
+        server_name _;
+
+        root /app/public;
+
+        location / {
+            try_files $uri /index.php?$query_string;
+        }
+
+        location ~ \.php$ {
+          fastcgi_pass 127.0.0.1:9000;
+          fastcgi_index index.php;
+          include fastcgi.conf;
+        }  
+      }
+    extraVolumes:
+      - name: secret-volume
+        secret:
+          secretName: laravel-keys
+    extraVolumeMounts:
+      - name: secret-volume
+        mountPath: "/var/secret"
+    sidecars:
+      - name: phpfpm
+        image: docker.io/bitnami/php-fpm:8.2.7-debian-11-r4
+        imagePullPolicy: "IfNotPresent"
+        env:
+          - name: NODE_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: spec.nodeName
+        ports:
+          - name: portname
+            containerPort: 9000
+        volumeMounts:
+          - name: staticsite
+            mountPath: /app
+          - name: secret-volume
+            mountPath: /var/secret
+        readinessProbe:
+            exec:
+              command: ["sh", "-c", "/app/setup_laravel.sh"]
+            initialDelaySeconds: 10
+            periodSeconds: 3600
+    sidecarSingleProcessNamespace: true
+---
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: mariadb
+  namespace: kube-system
+spec:
+  repo: https://charts.bitnami.com/bitnami
+  chart: mariadb
+  targetNamespace: web
+  valuesContent: |-
+    auth:
+      database: "laravel"
+      username: "laravelprocess"
+      existingSecret: "laravel-keys"
+      usePasswordFiles: true
+      customPasswordFiles:
+        root: /var/secret/mariadb-root-password
+        user: /var/secret/mariadb-password
+        replicator: /var/secret/mariadb-replication-password
+    primary:
+      service:
+        type: NodePort
+        ports:
+          nodePort:
+          mysql: 3306
+      extraVolumes:
+        - name: secret-volume
+          secret:
+            secretName: laravel-keys
+      extraVolumeMounts:
+        - name: secret-volume
+          mountPath: "/var/secret"
+          
