@@ -1,0 +1,403 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: weather
+  labels:
+    name: weather
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: weather-mariadb-pv
+spec:
+  capacity:
+    storage: 50Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-ssd
+  hostPath:
+    path: /media/ssd250/weather/mariadb
+    type: DirectoryOrCreate
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - HOSTNAME
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: weather-mariadb-pvc
+  namespace: weather
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: local-ssd
+  volumeName: weather-mariadb-pv
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: weather-mariadb
+  namespace: weather
+spec:
+  type: ClusterIP
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: 3306
+  selector:
+    app: weather-mariadb
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: weather-mariadb
+  namespace: weather
+spec:
+  serviceName: weather-mariadb
+  replicas: 1
+  selector:
+    matchLabels:
+      app: weather-mariadb
+  template:
+    metadata:
+      labels:
+        app: weather-mariadb
+    spec:
+      containers:
+        - name: mariadb
+          image: docker.io/library/mariadb:10.11
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: weather-db
+                  key: MYSQL_ROOT_PASSWORD
+            - name: MYSQL_DATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: weather-db
+                  key: MYSQL_DATABASE
+            - name: MYSQL_USER
+              valueFrom:
+                secretKeyRef:
+                  name: weather-db
+                  key: MYSQL_USER
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: weather-db
+                  key: MYSQL_PASSWORD
+          ports:
+            - containerPort: 3306
+              name: mysql
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql
+          livenessProbe:
+            tcpSocket:
+              port: 3306
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - mysqladmin ping -h 127.0.0.1 -u "$MYSQL_USER" -p"$MYSQL_PASSWORD"
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: weather-mariadb-pvc
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: weather-mariadb-backup
+  namespace: weather
+spec:
+  schedule: "15 2 * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          nodeSelector:
+            kubernetes.io/hostname: HOSTNAME
+          containers:
+            - name: backup
+              image: docker.io/library/mariadb:10.11
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: MYSQL_DATABASE
+                  valueFrom:
+                    secretKeyRef:
+                      name: weather-db
+                      key: MYSQL_DATABASE
+                - name: MYSQL_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: weather-db
+                      key: MYSQL_USER
+                - name: MYSQL_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: weather-db
+                      key: MYSQL_PASSWORD
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+                  ts=$(date +%F_%H%M%S)
+                  mysqldump -h weather-mariadb -u "$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE" > /backups/weather_${ts}.sql
+                  ls -1t /backups/weather_*.sql | tail -n +8 | xargs -r rm -f
+              volumeMounts:
+                - name: backups
+                  mountPath: /backups
+          volumes:
+            - name: backups
+              hostPath:
+                path: /media/ssd250/weather/backups
+                type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: weather-web-config
+  namespace: weather
+data:
+  nginx.conf: |-
+    server {
+      listen 0.0.0.0:8080;
+      server_name _;
+
+      root /app;
+      index index.php;
+
+      location / {
+        try_files $uri /index.php?$query_string;
+      }
+
+      location ~ \.php$ {
+        fastcgi_pass 127.0.0.1:9000;
+        fastcgi_index index.php;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME /app$fastcgi_script_name;
+      }
+    }
+  index.php: |-
+    <?php
+    $host = getenv('DB_HOST') ?: 'weather-mariadb';
+    $db = getenv('DB_NAME') ?: 'weather';
+    $user = getenv('DB_USER') ?: 'weather';
+    $pass = getenv('DB_PASS') ?: '';
+
+    $dsn = "mysql:host={$host};dbname={$db};charset=utf8mb4";
+
+    try {
+        $pdo = new PDO($dsn, $user, $pass, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+    } catch (Throwable $e) {
+        http_response_code(500);
+        echo "DB connection failed";
+        exit;
+    }
+
+    $pdo->exec("CREATE TABLE IF NOT EXISTS weather_readings (ts DATETIME NOT NULL PRIMARY KEY, temperature DOUBLE NULL, humidity DOUBLE NULL, pressure DOUBLE NULL, wind_speed DOUBLE NULL, wind_dir DOUBLE NULL, rainfall DOUBLE NULL)");
+    $count = $pdo->query("SELECT COUNT(*) AS c FROM weather_readings")->fetch(PDO::FETCH_ASSOC);
+
+    header('Content-Type: text/html; charset=utf-8');
+    echo "<h1>Weather archive</h1>";
+    echo "<p>Rows in database: " . htmlspecialchars($count['c'] ?? '0') . "</p>";
+    echo "<p>POST JSON to /ingest.php or upload a sqlite file using field name 'sqlite'.</p>";
+    ?>
+  ingest.php: |-
+    <?php
+    if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+        http_response_code(405);
+        echo "Use POST";
+        exit;
+    }
+
+    if (!empty($_FILES['sqlite']['tmp_name'])) {
+        $targetDir = '/var/inbox';
+        if (!is_dir($targetDir)) {
+            mkdir($targetDir, 0775, true);
+        }
+        $target = $targetDir . '/' . basename($_FILES['sqlite']['name']);
+        if (!move_uploaded_file($_FILES['sqlite']['tmp_name'], $target)) {
+            http_response_code(500);
+            echo "Failed to save upload";
+            exit;
+        }
+        echo "Saved to inbox";
+        exit;
+    }
+
+    $payload = file_get_contents('php://input');
+    $items = json_decode($payload, true);
+    if (!is_array($items)) {
+        http_response_code(400);
+        echo "Invalid JSON";
+        exit;
+    }
+
+    $host = getenv('DB_HOST') ?: 'weather-mariadb';
+    $db = getenv('DB_NAME') ?: 'weather';
+    $user = getenv('DB_USER') ?: 'weather';
+    $pass = getenv('DB_PASS') ?: '';
+
+    $dsn = "mysql:host={$host};dbname={$db};charset=utf8mb4";
+
+    try {
+        $pdo = new PDO($dsn, $user, $pass, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+    } catch (Throwable $e) {
+        http_response_code(500);
+        echo "DB connection failed";
+        exit;
+    }
+
+    $pdo->exec("CREATE TABLE IF NOT EXISTS weather_readings (ts DATETIME NOT NULL PRIMARY KEY, temperature DOUBLE NULL, humidity DOUBLE NULL, pressure DOUBLE NULL, wind_speed DOUBLE NULL, wind_dir DOUBLE NULL, rainfall DOUBLE NULL)");
+    $stmt = $pdo->prepare("REPLACE INTO weather_readings (ts, temperature, humidity, pressure, wind_speed, wind_dir, rainfall) VALUES (?, ?, ?, ?, ?, ?, ?)");
+
+    $inserted = 0;
+    foreach ($items as $row) {
+        if (!is_array($row) || empty($row['ts'])) {
+            continue;
+        }
+        $stmt->execute([
+            $row['ts'],
+            $row['temperature'] ?? null,
+            $row['humidity'] ?? null,
+            $row['pressure'] ?? null,
+            $row['wind_speed'] ?? null,
+            $row['wind_dir'] ?? null,
+            $row['rainfall'] ?? null,
+        ]);
+        $inserted++;
+    }
+
+    echo "Inserted {$inserted} rows";
+    ?>
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: weather-web
+  namespace: weather
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: weather-web
+  template:
+    metadata:
+      labels:
+        app: weather-web
+    spec:
+      containers:
+        - name: nginx
+          image: docker.io/library/nginx:1.25-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: http
+          volumeMounts:
+            - name: web-config
+              mountPath: /etc/nginx/conf.d/default.conf
+              subPath: nginx.conf
+            - name: web-app
+              mountPath: /app
+        - name: phpfpm
+          image: docker.io/bitnami/php-fpm:8.2.7-debian-11-r4
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: DB_HOST
+              value: weather-mariadb.weather.svc.cluster.local
+            - name: DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: weather-db
+                  key: MYSQL_DATABASE
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: weather-db
+                  key: MYSQL_USER
+            - name: DB_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: weather-db
+                  key: MYSQL_PASSWORD
+          ports:
+            - containerPort: 9000
+              name: fastcgi
+          volumeMounts:
+            - name: web-app
+              mountPath: /app
+            - name: inbox
+              mountPath: /var/inbox
+      volumes:
+        - name: web-config
+          configMap:
+            name: weather-web-config
+            items:
+              - key: nginx.conf
+                path: nginx.conf
+        - name: web-app
+          configMap:
+            name: weather-web-config
+            items:
+              - key: index.php
+                path: index.php
+              - key: ingest.php
+                path: ingest.php
+        - name: inbox
+          hostPath:
+            path: /media/ssd250/weather/inbox
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: weather-web
+  namespace: weather
+spec:
+  type: ClusterIP
+  selector:
+    app: weather-web
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: weather-web
+  namespace: weather
+  annotations:
+    kubernetes.io/ingress.class: "traefik"
+spec:
+  rules:
+    - host: weather.HOSTNAME.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: weather-web
+                port:
+                  number: 80

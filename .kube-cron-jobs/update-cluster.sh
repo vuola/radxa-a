@@ -9,6 +9,7 @@ username="vuola"
 kube_cron_jobs_dir="/home/"$username"/.kube-cron-jobs"
 pubcluster_dir="$kube_cron_jobs_dir/pubcluster"
 manifests_dir="/var/lib/rancher/k3s/server/manifests"
+local_manifests_dir="$kube_cron_jobs_dir/local-manifests"
 timestamp_file="$kube_cron_jobs_dir/.timestamp"
 new_host="$(hostname)"
 
@@ -37,6 +38,14 @@ if [ -f "$timestamp_file" ]; then
         sudo sed "s/HOSTNAME/$new_host/g" "$file" > "$kube_cron_jobs_dir"/"$file"
         sudo cp "$kube_cron_jobs_dir"/"$file" "$manifests_dir"/"$file"
     done
+    if [ -d "$local_manifests_dir" ]; then
+      for file in "$local_manifests_dir"/*.yaml; do
+        [ -e "$file" ] || continue
+        local_name="$(basename "$file")"
+        sudo sed "s/HOSTNAME/$new_host/g" "$file" > "$kube_cron_jobs_dir"/"$local_name"
+        sudo cp "$kube_cron_jobs_dir"/"$local_name" "$manifests_dir"/"$local_name"
+      done
+    fi
     # Step 4: Write the latest update timestamp to .timestamp file
     echo "$latest_update" > "$timestamp_file"
   fi
@@ -58,6 +67,14 @@ else
             sudo sed "s/HOSTNAME/$new_host/g" "$file" > "$kube_cron_jobs_dir"/"$file"
             sudo cp "$kube_cron_jobs_dir"/"$file" "$manifests_dir"/"$file"
           done
+          if [ -d "$local_manifests_dir" ]; then
+            for file in "$local_manifests_dir"/*.yaml; do
+              [ -e "$file" ] || continue
+              local_name="$(basename "$file")"
+              sudo sed "s/HOSTNAME/$new_host/g" "$file" > "$kube_cron_jobs_dir"/"$local_name"
+              sudo cp "$kube_cron_jobs_dir"/"$local_name" "$manifests_dir"/"$local_name"
+            done
+          fi
           git rev-list HEAD --count > "$timestamp_file"
           break
       else
