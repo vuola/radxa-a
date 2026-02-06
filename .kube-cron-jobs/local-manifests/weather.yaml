@@ -199,10 +199,17 @@ data:
     }
   index.php: |-
     <?php
+    $readSecret = function(string $path, string $fallback = ''): string {
+      if (is_readable($path)) {
+        return trim((string)file_get_contents($path));
+      }
+      return $fallback;
+    };
+
     $host = getenv('DB_HOST') ?: 'weather-mariadb';
-    $db = getenv('DB_NAME') ?: 'weather';
-    $user = getenv('DB_USER') ?: 'weather';
-    $pass = getenv('DB_PASS') ?: '';
+    $db = getenv('DB_NAME') ?: $readSecret('/var/secret/MYSQL_DATABASE', 'weather');
+    $user = getenv('DB_USER') ?: $readSecret('/var/secret/MYSQL_USER', 'weather');
+    $pass = getenv('DB_PASS') ?: $readSecret('/var/secret/MYSQL_PASSWORD', '');
 
     $dsn = "mysql:host={$host};dbname={$db};charset=utf8mb4";
 
@@ -253,10 +260,17 @@ data:
         exit;
     }
 
+    $readSecret = function(string $path, string $fallback = ''): string {
+      if (is_readable($path)) {
+        return trim((string)file_get_contents($path));
+      }
+      return $fallback;
+    };
+
     $host = getenv('DB_HOST') ?: 'weather-mariadb';
-    $db = getenv('DB_NAME') ?: 'weather';
-    $user = getenv('DB_USER') ?: 'weather';
-    $pass = getenv('DB_PASS') ?: '';
+    $db = getenv('DB_NAME') ?: $readSecret('/var/secret/MYSQL_DATABASE', 'weather');
+    $user = getenv('DB_USER') ?: $readSecret('/var/secret/MYSQL_USER', 'weather');
+    $pass = getenv('DB_PASS') ?: $readSecret('/var/secret/MYSQL_PASSWORD', '');
 
     $dsn = "mysql:host={$host};dbname={$db};charset=utf8mb4";
 
@@ -348,6 +362,8 @@ spec:
               mountPath: /app
             - name: inbox
               mountPath: /var/inbox
+            - name: db-secret
+              mountPath: /var/secret
       volumes:
         - name: web-config
           configMap:
@@ -367,6 +383,9 @@ spec:
           hostPath:
             path: /media/ssd250/weather/inbox
             type: DirectoryOrCreate
+        - name: db-secret
+          secret:
+            secretName: weather-db
 ---
 apiVersion: v1
 kind: Service
