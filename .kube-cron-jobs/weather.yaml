@@ -26,7 +26,7 @@ spec:
             - key: kubernetes.io/hostname
               operator: In
               values:
-                - HOSTNAME
+                - radxa-a
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -134,7 +134,7 @@ spec:
         spec:
           restartPolicy: OnFailure
           nodeSelector:
-            kubernetes.io/hostname: HOSTNAME
+            kubernetes.io/hostname: radxa-a
           containers:
             - name: backup
               image: docker.io/library/mariadb:10.11
@@ -431,7 +431,7 @@ metadata:
     kubernetes.io/ingress.class: "traefik"
 spec:
   rules:
-    - host: HOSTNAME.local
+    - host: radxa-a.local
       http:
         paths:
           - path: /

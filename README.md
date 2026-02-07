@@ -43,9 +43,9 @@ Deployed in namespace `weather`:
 
 ### Endpoints
 
-- Web UI: http://weather.radxa-a.local/
-- Ingest endpoint:
-  - POST JSON to http://weather.radxa-a.local/ingest.php
+-- Web UI: http://radxa-a.local/
+-- Ingest endpoint:
+  - POST JSON to http://radxa-a.local/ingest.php
   - Upload SQLite file as multipart field `sqlite` to the same endpoint
 
 ## moxa.local upload workflow (Option A)
@@ -61,7 +61,7 @@ Path on moxa.local:
 Behavior:
 
 1. Creates an online SQLite backup of /var/lib/moxa/weather.db
-2. Uploads the backup to http://weather.radxa-a.local/ingest.php
+2. Uploads the backup to http://radxa-a.local/ingest.php
 3. On success, deletes rows older than 24 hours and truncates WAL
 
 ### Systemd unit and timer
@@ -72,6 +72,31 @@ Behavior:
 Timer schedule:
 
 - Daily at 00:00:00 (midnight)
+
+### Best-practice (least privilege)
+
+To avoid interactive sudo and minimize root usage, run the backup uploader as a dedicated, unprivileged service user.
+
+Recommended setup on moxa.local (run once as root):
+
+```
+# create a service user with no shell login
+sudo useradd --system --home /var/lib/moxa --shell /usr/sbin/nologin moxa-backup
+
+# allow moxa-backup to read/write the DB and archive dir via www-data group
+sudo usermod -aG www-data moxa-backup
+
+# ensure group ownership and setgid on the DB directory
+sudo mkdir -p /var/lib/moxa /var/lib/moxa/archive
+sudo chown -R vuola:www-data /var/lib/moxa
+sudo chmod 2775 /var/lib/moxa /var/lib/moxa/archive
+
+# restrict DB file access to owner+group
+sudo chown vuola:www-data /var/lib/moxa/weather.db
+sudo chmod 0660 /var/lib/moxa/weather.db
+```
+
+With this in place, the service runs as `moxa-backup` (see service file below) and no interactive sudo is needed for nightly runs.
 
 ### Install commands (run on radxa-a.local)
 
@@ -102,7 +127,51 @@ EOF
 Optional immediate run:
 
 ```
-ssh vuola@moxa.local "sudo /usr/local/bin/moxa-upload-archive.sh"
+# NOTE: starting the system unit requires root or polkit authorization.
+# If you don't have sudoers rights, skip this and let the timer run at midnight.
+ssh vuola@moxa.local "sudo systemctl start moxa-archive-upload.service"
+```
+
+Admin-only immediate test (run on moxa.local):
+
+```
+sudo systemctl start moxa-archive-upload.service
+sudo systemctl status moxa-archive-upload.service --no-pager
+sudo journalctl -u moxa-archive-upload.service -n 200 --no-pager
+```
+
+### First-run verification (sudoers-free)
+
+Run these checks as the normal user (no sudo required):
+
+```
+# confirm the timer is active
+systemctl status moxa-archive-upload.timer --no-pager
+
+# see next scheduled run time
+systemctl list-timers --all | grep moxa-archive-upload
+
+# verify a fresh archive file was created and removed after upload
+ls -l /var/lib/moxa/archive
+
+# confirm the DB still has rows after pruning
+sqlite3 -header -column /var/lib/moxa/weather.db "SELECT COUNT(*) AS rows FROM weather;"
+```
+
+Success verification (radxa-a.local):
+
+```
+# a new SQLite upload should appear here after a successful run
+ls -l /media/ssd250/weather/inbox
+
+# optional: check the ingest endpoint is live (GET returns 405)
+curl -i http://radxa-a.local/ingest.php
+```
+
+If the service fails, view logs without sudo (requires systemd journal permissions for your user):
+
+```
+journalctl -u moxa-archive-upload.service -n 200 --no-pager
 ```
 
 ## DNS / mDNS notes
@@ -120,7 +189,7 @@ On radxa-a.local:
 
 ```
 kubectl -n weather get pods,svc,ingress
-curl -sSf http://192.168.68.111/ -H "Host: weather.radxa-a.local"
+curl -sSf http://192.168.68.111/ -H "Host: radxa-a.local"
 ```
 
 On moxa.local:
