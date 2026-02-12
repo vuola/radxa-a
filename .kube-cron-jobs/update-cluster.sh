@@ -15,11 +15,17 @@ new_host="$(hostname)"
 
 apply_local_manifests() {
   if [ -d "$local_manifests_dir" ]; then
+    echo "Applying local manifests from: $local_manifests_dir"
     for file in "$local_manifests_dir"/*.yaml; do
       [ -e "$file" ] || continue
       local_name="$(basename "$file")"
+      echo "  - Rendering $local_name with HOSTNAME=$new_host"
       sudo sed "s/HOSTNAME/$new_host/g" "$file" > "$kube_cron_jobs_dir"/"$local_name"
       sudo cp "$kube_cron_jobs_dir"/"$local_name" "$manifests_dir"/"$local_name"
+      if grep -q "HOSTNAME" "$kube_cron_jobs_dir"/"$local_name"; then
+        echo "  ! WARNING: HOSTNAME placeholder still present in $kube_cron_jobs_dir/$local_name"
+      fi
+      echo "  - Copied to $manifests_dir/$local_name"
     done
   fi
 }
@@ -46,8 +52,12 @@ if [ -f "$timestamp_file" ]; then
     # replace all instances of string HOSTNAME by local hostname   
     # and move files to k3s auto-manifest directory
     for file in  *.yaml; do
-        sudo sed "s/HOSTNAME/$new_host/g" "$file" > "$kube_cron_jobs_dir"/"$file"
-        sudo cp "$kube_cron_jobs_dir"/"$file" "$manifests_dir"/"$file"
+      echo "Applying pubcluster manifest: $file (HOSTNAME=$new_host)"
+      sudo sed "s/HOSTNAME/$new_host/g" "$file" > "$kube_cron_jobs_dir"/"$file"
+      sudo cp "$kube_cron_jobs_dir"/"$file" "$manifests_dir"/"$file"
+      if grep -q "HOSTNAME" "$kube_cron_jobs_dir"/"$file"; then
+        echo "  ! WARNING: HOSTNAME placeholder still present in $kube_cron_jobs_dir/$file"
+      fi
     done
     # Step 4: Write the latest update timestamp to .timestamp file
     echo "$latest_update" > "$timestamp_file"

@@ -8,7 +8,7 @@ metadata:
 apiVersion: v1
 kind: PersistentVolume
 metadata:
-  name: weather-mariadb-pv
+  name: weather-postgres-pv
 spec:
   capacity:
     storage: 50Gi
@@ -17,7 +17,7 @@ spec:
   persistentVolumeReclaimPolicy: Retain
   storageClassName: local-ssd
   hostPath:
-    path: /media/ssd250/weather/mariadb
+    path: /media/ssd250/weather/postgres
     type: DirectoryOrCreate
   nodeAffinity:
     required:
@@ -31,7 +31,7 @@ spec:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: weather-mariadb-pvc
+  name: weather-postgres-pvc
   namespace: weather
 spec:
   accessModes:
@@ -40,72 +40,70 @@ spec:
     requests:
       storage: 50Gi
   storageClassName: local-ssd
-  volumeName: weather-mariadb-pv
+  volumeName: weather-postgres-pv
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: weather-mariadb
+  name: weather-postgres
   namespace: weather
 spec:
   type: ClusterIP
   ports:
-    - name: mysql
-      port: 3306
-      targetPort: 3306
+    - name: postgres
+      port: 5432
+      targetPort: 5432
   selector:
-    app: weather-mariadb
+    app: weather-postgres
 ---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: weather-mariadb
+  name: weather-postgres
   namespace: weather
 spec:
-  serviceName: weather-mariadb
+  serviceName: weather-postgres
   replicas: 1
   selector:
     matchLabels:
-      app: weather-mariadb
+      app: weather-postgres
   template:
     metadata:
       labels:
-        app: weather-mariadb
+        app: weather-postgres
     spec:
       containers:
-        - name: mariadb
-          image: docker.io/library/mariadb:10.11
+        - name: postgres
+          image: docker.io/library/postgres:16-alpine
           imagePullPolicy: IfNotPresent
           env:
-            - name: MYSQL_ROOT_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: weather-db
-                  key: MYSQL_ROOT_PASSWORD
-            - name: MYSQL_DATABASE
+            - name: POSTGRES_DB
               valueFrom:
                 secretKeyRef:
                   name: weather-db
                   key: MYSQL_DATABASE
-            - name: MYSQL_USER
+            - name: POSTGRES_USER
               valueFrom:
                 secretKeyRef:
                   name: weather-db
                   key: MYSQL_USER
-            - name: MYSQL_PASSWORD
+            - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: weather-db
                   key: MYSQL_PASSWORD
           ports:
-            - containerPort: 3306
-              name: mysql
+            - containerPort: 5432
+              name: postgres
           volumeMounts:
             - name: data
-              mountPath: /var/lib/mysql
+              mountPath: /var/lib/postgresql/data
           livenessProbe:
-            tcpSocket:
-              port: 3306
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
             initialDelaySeconds: 30
             periodSeconds: 10
           readinessProbe:
@@ -113,18 +111,18 @@ spec:
               command:
                 - /bin/sh
                 - -c
-                - mysqladmin ping -h 127.0.0.1 -u "$MYSQL_USER" -p"$MYSQL_PASSWORD"
+                - pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
             initialDelaySeconds: 10
             periodSeconds: 10
       volumes:
         - name: data
           persistentVolumeClaim:
-            claimName: weather-mariadb-pvc
+            claimName: weather-postgres-pvc
 ---
 apiVersion: batch/v1
 kind: CronJob
 metadata:
-  name: weather-mariadb-backup
+  name: weather-postgres-backup
   namespace: weather
 spec:
   schedule: "15 2 * * *"
@@ -137,20 +135,25 @@ spec:
             kubernetes.io/hostname: HOSTNAME
           containers:
             - name: backup
-              image: docker.io/library/mariadb:10.11
+              image: docker.io/library/postgres:16-alpine
               imagePullPolicy: IfNotPresent
               env:
-                - name: MYSQL_DATABASE
+                - name: POSTGRES_DB
                   valueFrom:
                     secretKeyRef:
                       name: weather-db
                       key: MYSQL_DATABASE
-                - name: MYSQL_USER
+                - name: POSTGRES_USER
                   valueFrom:
                     secretKeyRef:
                       name: weather-db
                       key: MYSQL_USER
-                - name: MYSQL_PASSWORD
+                - name: POSTGRES_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: weather-db
+                      key: MYSQL_PASSWORD
+                - name: PGPASSWORD
                   valueFrom:
                     secretKeyRef:
                       name: weather-db
@@ -161,7 +164,7 @@ spec:
                 - |
                   set -e
                   ts=$(date +%F_%H%M%S)
-                  mysqldump -h weather-mariadb -u "$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE" > /backups/weather_${ts}.sql
+                  pg_dump -h weather-postgres -U "$POSTGRES_USER" "$POSTGRES_DB" > /backups/weather_${ts}.sql
                   ls -1t /backups/weather_*.sql | tail -n +8 | xargs -r rm -f
               volumeMounts:
                 - name: backups
@@ -170,6 +173,167 @@ spec:
             - name: backups
               hostPath:
                 path: /media/ssd250/weather/backups
+                type: DirectoryOrCreate
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: weather-sqlite-import
+  namespace: weather
+spec:
+  schedule: "10 0 * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: importer
+              image: docker.io/library/python:3.11-slim
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: PGHOST
+                  value: weather-postgres
+                - name: PGDATABASE
+                  valueFrom:
+                    secretKeyRef:
+                      name: weather-db
+                      key: MYSQL_DATABASE
+                - name: PGUSER
+                  valueFrom:
+                    secretKeyRef:
+                      name: weather-db
+                      key: MYSQL_USER
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: weather-db
+                      key: MYSQL_PASSWORD
+                - name: INBOX_DIR
+                  value: /var/inbox
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+                  python -m pip install --no-cache-dir psycopg2-binary
+                  python - <<'PY'
+                  import json
+                  import os
+                  import shutil
+                  import sqlite3
+                  import psycopg2
+                  from psycopg2.extras import execute_batch, Json
+
+                  inbox = os.environ.get("INBOX_DIR", "/var/inbox")
+                  processed_dir = os.path.join(inbox, "processed")
+                  os.makedirs(processed_dir, exist_ok=True)
+
+                  pg_conn = psycopg2.connect(
+                      host=os.environ["PGHOST"],
+                      dbname=os.environ["PGDATABASE"],
+                      user=os.environ["PGUSER"],
+                      password=os.environ["PGPASSWORD"],
+                  )
+                  pg_conn.autocommit = True
+                  cur = pg_conn.cursor()
+                  cur.execute(
+                      """
+                      CREATE TABLE IF NOT EXISTS weather (
+                        id BIGSERIAL PRIMARY KEY,
+                        ts TIMESTAMPTZ,
+                        temperature_c DOUBLE PRECISION,
+                        dew_point_c DOUBLE PRECISION,
+                        relative_humidity DOUBLE PRECISION,
+                        pressure_hpa DOUBLE PRECISION,
+                        wind_speed_ms DOUBLE PRECISION,
+                        wind_direction_deg DOUBLE PRECISION,
+                        precip_mmph DOUBLE PRECISION,
+                        energy_today_wh BIGINT,
+                        pv_feed_in_w INTEGER,
+                        battery_soc_pct INTEGER,
+                        active_power_pcc_w INTEGER,
+                        bat_charge_w INTEGER,
+                        bat_discharge_w INTEGER,
+                        sma_json JSONB,
+                        merged_at TIMESTAMPTZ,
+                        pushed_at TIMESTAMPTZ
+                      );
+                      CREATE UNIQUE INDEX IF NOT EXISTS weather_ts_unique ON weather (ts);
+                      """
+                  )
+
+                  insert_sql = """
+                  INSERT INTO weather (
+                    ts, temperature_c, dew_point_c, relative_humidity, pressure_hpa,
+                    wind_speed_ms, wind_direction_deg, precip_mmph,
+                    energy_today_wh, pv_feed_in_w, battery_soc_pct, active_power_pcc_w,
+                    bat_charge_w, bat_discharge_w, sma_json, merged_at, pushed_at
+                  ) VALUES (
+                    %(ts)s, %(temperature_c)s, %(dew_point_c)s, %(relative_humidity)s, %(pressure_hpa)s,
+                    %(wind_speed_ms)s, %(wind_direction_deg)s, %(precip_mmph)s,
+                    %(energy_today_wh)s, %(pv_feed_in_w)s, %(battery_soc_pct)s, %(active_power_pcc_w)s,
+                    %(bat_charge_w)s, %(bat_discharge_w)s, %(sma_json)s, %(merged_at)s, %(pushed_at)s
+                  )
+                  ON CONFLICT (ts) DO NOTHING;
+                  """
+
+                  files = sorted(
+                      f for f in os.listdir(inbox)
+                      if f.endswith(".db") and os.path.isfile(os.path.join(inbox, f))
+                  )
+                  for fname in files:
+                      fpath = os.path.join(inbox, fname)
+                      conn = sqlite3.connect(f"file:{fpath}?immutable=1", uri=True)
+                      try:
+                          scur = conn.cursor()
+                          tables = scur.execute(
+                              "SELECT name FROM sqlite_master WHERE type='table' AND name='weather'"
+                          ).fetchall()
+                          if not tables:
+                              continue
+                          scur.execute(
+                              "SELECT ts, temperature_c, dew_point_c, relative_humidity, pressure_hpa, "
+                              "wind_speed_ms, wind_direction_deg, precip_mmph, energy_today_wh, pv_feed_in_w, "
+                              "battery_soc_pct, active_power_pcc_w, bat_charge_w, bat_discharge_w, sma_json, merged_at, pushed_at "
+                              "FROM weather"
+                          )
+                          rows = []
+                          for row in scur:
+                              rows.append({
+                                  "ts": row[0],
+                                  "temperature_c": row[1],
+                                  "dew_point_c": row[2],
+                                  "relative_humidity": row[3],
+                                  "pressure_hpa": row[4],
+                                  "wind_speed_ms": row[5],
+                                  "wind_direction_deg": row[6],
+                                  "precip_mmph": row[7],
+                                  "energy_today_wh": row[8],
+                                  "pv_feed_in_w": row[9],
+                                  "battery_soc_pct": row[10],
+                                  "active_power_pcc_w": row[11],
+                                  "bat_charge_w": row[12],
+                                  "bat_discharge_w": row[13],
+                                  "sma_json": Json(json.loads(row[14])) if row[14] else None,
+                                  "merged_at": row[15],
+                                  "pushed_at": row[16],
+                              })
+                          if rows:
+                              execute_batch(cur, insert_sql, rows, page_size=500)
+                      finally:
+                          conn.close()
+                      shutil.move(fpath, os.path.join(processed_dir, fname))
+                  cur.close()
+                  pg_conn.close()
+                  PY
+              volumeMounts:
+                - name: inbox
+                  mountPath: /var/inbox
+          volumes:
+            - name: inbox
+              hostPath:
+                path: /media/ssd250/weather/inbox
                 type: DirectoryOrCreate
 ---
 apiVersion: v1
@@ -208,12 +372,12 @@ data:
       return $fallback;
     };
 
-    $host = getenv('DB_HOST') ?: 'weather-mariadb';
+    $host = getenv('DB_HOST') ?: 'weather-postgres';
     $db = getenv('DB_NAME') ?: $readSecret('/var/secret/MYSQL_DATABASE', 'weather');
     $user = getenv('DB_USER') ?: $readSecret('/var/secret/MYSQL_USER', 'weather');
     $pass = getenv('DB_PASS') ?: $readSecret('/var/secret/MYSQL_PASSWORD', '');
 
-    $dsn = "mysql:host={$host};dbname={$db};charset=utf8mb4";
+    $dsn = "pgsql:host={$host};dbname={$db}";
 
     try {
         $pdo = new PDO($dsn, $user, $pass, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
@@ -223,8 +387,8 @@ data:
         exit;
     }
 
-    $pdo->exec("CREATE TABLE IF NOT EXISTS weather_readings (ts DATETIME NOT NULL PRIMARY KEY, temperature DOUBLE NULL, humidity DOUBLE NULL, pressure DOUBLE NULL, wind_speed DOUBLE NULL, wind_dir DOUBLE NULL, rainfall DOUBLE NULL)");
-    $count = $pdo->query("SELECT COUNT(*) AS c FROM weather_readings")->fetch(PDO::FETCH_ASSOC);
+    $pdo->exec("CREATE TABLE IF NOT EXISTS weather (id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ DEFAULT now(), temperature_c DOUBLE PRECISION NULL, dew_point_c DOUBLE PRECISION NULL, relative_humidity DOUBLE PRECISION NULL, pressure_hpa DOUBLE PRECISION NULL, wind_speed_ms DOUBLE PRECISION NULL, wind_direction_deg DOUBLE PRECISION NULL, precip_mmph DOUBLE PRECISION NULL, energy_today_wh BIGINT NULL, pv_feed_in_w INTEGER NULL, battery_soc_pct INTEGER NULL, active_power_pcc_w INTEGER NULL, bat_charge_w INTEGER NULL, bat_discharge_w INTEGER NULL, sma_json JSONB NULL, merged_at TIMESTAMPTZ NULL, pushed_at TIMESTAMPTZ NULL)");
+    $count = $pdo->query("SELECT COUNT(*) AS c FROM weather")->fetch(PDO::FETCH_ASSOC);
 
     header('Content-Type: text/html; charset=utf-8');
     echo "<h1>Weather archive</h1>";
@@ -269,12 +433,12 @@ data:
       return $fallback;
     };
 
-    $host = getenv('DB_HOST') ?: 'weather-mariadb';
+    $host = getenv('DB_HOST') ?: 'weather-postgres';
     $db = getenv('DB_NAME') ?: $readSecret('/var/secret/MYSQL_DATABASE', 'weather');
     $user = getenv('DB_USER') ?: $readSecret('/var/secret/MYSQL_USER', 'weather');
     $pass = getenv('DB_PASS') ?: $readSecret('/var/secret/MYSQL_PASSWORD', '');
 
-    $dsn = "mysql:host={$host};dbname={$db};charset=utf8mb4";
+    $dsn = "pgsql:host={$host};dbname={$db}";
 
     try {
         $pdo = new PDO($dsn, $user, $pass, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
@@ -284,23 +448,40 @@ data:
         exit;
     }
 
-    $pdo->exec("CREATE TABLE IF NOT EXISTS weather_readings (ts DATETIME NOT NULL PRIMARY KEY, temperature DOUBLE NULL, humidity DOUBLE NULL, pressure DOUBLE NULL, wind_speed DOUBLE NULL, wind_dir DOUBLE NULL, rainfall DOUBLE NULL)");
-    $stmt = $pdo->prepare("REPLACE INTO weather_readings (ts, temperature, humidity, pressure, wind_speed, wind_dir, rainfall) VALUES (?, ?, ?, ?, ?, ?, ?)");
+    $pdo->exec("CREATE TABLE IF NOT EXISTS weather (id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ DEFAULT now(), temperature_c DOUBLE PRECISION NULL, dew_point_c DOUBLE PRECISION NULL, relative_humidity DOUBLE PRECISION NULL, pressure_hpa DOUBLE PRECISION NULL, wind_speed_ms DOUBLE PRECISION NULL, wind_direction_deg DOUBLE PRECISION NULL, precip_mmph DOUBLE PRECISION NULL, energy_today_wh BIGINT NULL, pv_feed_in_w INTEGER NULL, battery_soc_pct INTEGER NULL, active_power_pcc_w INTEGER NULL, bat_charge_w INTEGER NULL, bat_discharge_w INTEGER NULL, sma_json JSONB NULL, merged_at TIMESTAMPTZ NULL, pushed_at TIMESTAMPTZ NULL)");
+    $stmtWithId = $pdo->prepare("INSERT INTO weather (id, ts, temperature_c, dew_point_c, relative_humidity, pressure_hpa, wind_speed_ms, wind_direction_deg, precip_mmph, energy_today_wh, pv_feed_in_w, battery_soc_pct, active_power_pcc_w, bat_charge_w, bat_discharge_w, sma_json, merged_at, pushed_at) VALUES (:id, :ts, :temperature_c, :dew_point_c, :relative_humidity, :pressure_hpa, :wind_speed_ms, :wind_direction_deg, :precip_mmph, :energy_today_wh, :pv_feed_in_w, :battery_soc_pct, :active_power_pcc_w, :bat_charge_w, :bat_discharge_w, :sma_json, :merged_at, :pushed_at) ON CONFLICT (id) DO UPDATE SET ts=EXCLUDED.ts, temperature_c=EXCLUDED.temperature_c, dew_point_c=EXCLUDED.dew_point_c, relative_humidity=EXCLUDED.relative_humidity, pressure_hpa=EXCLUDED.pressure_hpa, wind_speed_ms=EXCLUDED.wind_speed_ms, wind_direction_deg=EXCLUDED.wind_direction_deg, precip_mmph=EXCLUDED.precip_mmph, energy_today_wh=EXCLUDED.energy_today_wh, pv_feed_in_w=EXCLUDED.pv_feed_in_w, battery_soc_pct=EXCLUDED.battery_soc_pct, active_power_pcc_w=EXCLUDED.active_power_pcc_w, bat_charge_w=EXCLUDED.bat_charge_w, bat_discharge_w=EXCLUDED.bat_discharge_w, sma_json=EXCLUDED.sma_json, merged_at=EXCLUDED.merged_at, pushed_at=EXCLUDED.pushed_at");
+    $stmtNoId = $pdo->prepare("INSERT INTO weather (ts, temperature_c, dew_point_c, relative_humidity, pressure_hpa, wind_speed_ms, wind_direction_deg, precip_mmph, energy_today_wh, pv_feed_in_w, battery_soc_pct, active_power_pcc_w, bat_charge_w, bat_discharge_w, sma_json, merged_at, pushed_at) VALUES (:ts, :temperature_c, :dew_point_c, :relative_humidity, :pressure_hpa, :wind_speed_ms, :wind_direction_deg, :precip_mmph, :energy_today_wh, :pv_feed_in_w, :battery_soc_pct, :active_power_pcc_w, :bat_charge_w, :bat_discharge_w, :sma_json, :merged_at, :pushed_at)");
 
     $inserted = 0;
     foreach ($items as $row) {
-        if (!is_array($row) || empty($row['ts'])) {
+        if (!is_array($row)) {
             continue;
         }
-        $stmt->execute([
-            $row['ts'],
-            $row['temperature'] ?? null,
-            $row['humidity'] ?? null,
-            $row['pressure'] ?? null,
-            $row['wind_speed'] ?? null,
-            $row['wind_dir'] ?? null,
-            $row['rainfall'] ?? null,
-        ]);
+        $payload = [
+          ':ts' => $row['ts'] ?? null,
+          ':temperature_c' => $row['temperature_c'] ?? null,
+          ':dew_point_c' => $row['dew_point_c'] ?? null,
+          ':relative_humidity' => $row['relative_humidity'] ?? null,
+          ':pressure_hpa' => $row['pressure_hpa'] ?? null,
+          ':wind_speed_ms' => $row['wind_speed_ms'] ?? null,
+          ':wind_direction_deg' => $row['wind_direction_deg'] ?? null,
+          ':precip_mmph' => $row['precip_mmph'] ?? null,
+          ':energy_today_wh' => $row['energy_today_wh'] ?? null,
+          ':pv_feed_in_w' => $row['pv_feed_in_w'] ?? null,
+          ':battery_soc_pct' => $row['battery_soc_pct'] ?? null,
+          ':active_power_pcc_w' => $row['active_power_pcc_w'] ?? null,
+          ':bat_charge_w' => $row['bat_charge_w'] ?? null,
+          ':bat_discharge_w' => $row['bat_discharge_w'] ?? null,
+          ':sma_json' => isset($row['sma_json']) ? json_encode($row['sma_json']) : null,
+          ':merged_at' => $row['merged_at'] ?? null,
+          ':pushed_at' => $row['pushed_at'] ?? null,
+        ];
+        if (!empty($row['id'])) {
+          $payload[':id'] = $row['id'];
+          $stmtWithId->execute($payload);
+        } else {
+          $stmtNoId->execute($payload);
+        }
         $inserted++;
     }
 
@@ -359,7 +540,7 @@ spec:
             - name: PHP_UPLOAD_MAX_FILESIZE
               value: 256M
             - name: DB_HOST
-              value: weather-mariadb.weather.svc.cluster.local
+              value: weather-postgres.weather.svc.cluster.local
             - name: DB_NAME
               valueFrom:
                 secretKeyRef:
@@ -441,3 +622,118 @@ spec:
                 name: weather-web
                 port:
                   number: 80
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mosquitto-config
+  namespace: weather
+data:
+  mosquitto.conf: |
+    persistence true
+    persistence_location /mosquitto/data/
+    autosave_interval 30
+
+    listener 1883
+    allow_anonymous true
+
+    log_dest stdout
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: mosquitto-pv
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-ssd
+  hostPath:
+    path: /media/ssd250/weather/mosquitto
+    type: DirectoryOrCreate
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - HOSTNAME
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mosquitto-data
+  namespace: weather
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: local-ssd
+  volumeName: mosquitto-pv
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mosquitto
+  namespace: weather
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mosquitto
+  template:
+    metadata:
+      labels:
+        app: mosquitto
+    spec:
+      containers:
+        - name: mosquitto
+          image: eclipse-mosquitto:2
+          ports:
+            - containerPort: 1883
+          volumeMounts:
+            - name: config
+              mountPath: /mosquitto/config/mosquitto.conf
+              subPath: mosquitto.conf
+            - name: data
+              mountPath: /mosquitto/data
+      volumes:
+        - name: config
+          configMap:
+            name: mosquitto-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: mosquitto-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mqtt
+  namespace: weather
+spec:
+  type: ClusterIP
+  selector:
+    app: mosquitto
+  ports:
+    - port: 1883
+      targetPort: 1883
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mqtt-nodeport
+  namespace: weather
+spec:
+  type: NodePort
+  selector:
+    app: mosquitto
+  ports:
+    - port: 1883
+      targetPort: 1883
+      nodePort: 31884

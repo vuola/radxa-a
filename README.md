@@ -5,39 +5,48 @@ This repository documents the weather archive stack running on radxa-a.local and
 ## Overview
 
 - **radxa-a.local** runs a k3s cluster that hosts:
-  - MariaDB for weather data (persisted to the SSD at /media/ssd250)
+  - PostgreSQL for weather data (persisted to the SSD at /media/ssd250)
   - NGINX + PHP for a simple web UI and ingest endpoint
   - Daily DB backups to /media/ssd250/weather/backups
 - **moxa.local** keeps the live SQLite database and uploads an online backup once per day.
+- **Backup retention**: keep the **latest 3 dumps** (today + 2 previous) via retention-based rotation to balance disk usage and safety.
 
 ## Components on radxa-a.local
 
-### Local manifest overlay
+### Editing manifests (correct workflow)
 
-Local manifests live at:
+Where to edit:
 
-- /home/vuola/.kube-cron-jobs/local-manifests/weather.yaml
+- **Local/custom changes** belong in /home/vuola/.kube-cron-jobs/local-manifests/
+  - Example: /home/vuola/.kube-cron-jobs/local-manifests/weather.yaml
+- **Upstream/base manifests** are pulled into /home/vuola/.kube-cron-jobs/pubcluster/ and should not be edited locally.
 
-The update script applies both pubcluster manifests and local manifests:
+How updates are applied:
 
-- /home/vuola/.kube-cron-jobs/update-cluster.sh
+- /home/vuola/.kube-cron-jobs/update-cluster.sh renders HOSTNAME placeholders and copies the rendered YAML into
+  /var/lib/rancher/k3s/server/manifests for auto-apply by k3s.
+- Local manifests are applied on every run and override pubcluster files with the same filename.
 
-Local manifests are applied every run and use HOSTNAME replacement to pin local paths to the correct node.
+Correct process:
+
+1. Edit /home/vuola/.kube-cron-jobs/local-manifests/*.yaml (use HOSTNAME where needed).
+2. Run /home/vuola/.kube-cron-jobs/update-cluster.sh (or wait for the cron run).
 
 ### Weather namespace resources
 
 Deployed in namespace `weather`:
 
-- **StatefulSet**: weather-mariadb (MariaDB 10.11)
-- **Service**: weather-mariadb (ClusterIP:3306)
-- **CronJob**: weather-mariadb-backup (nightly backups)
+- **StatefulSet**: weather-postgres (PostgreSQL 16)
+- **Service**: weather-postgres (ClusterIP:5432)
+- **CronJob**: weather-postgres-backup (nightly backups)
+- **CronJob**: weather-sqlite-import (imports uploaded SQLite to PostgreSQL)
 - **Deployment**: weather-web (NGINX + PHP-FPM)
 - **Service**: weather-web (ClusterIP:80)
 - **Ingress**: weather-web (Traefik)
 
 ### Storage paths (radxa-a.local)
 
-- MariaDB data: /media/ssd250/weather/mariadb
+- PostgreSQL data: /media/ssd250/weather/postgres
 - Backups: /media/ssd250/weather/backups
 - Upload inbox: /media/ssd250/weather/inbox
 
@@ -72,6 +81,11 @@ Behavior:
 Timer schedule:
 
 - Daily at 00:00:00 (midnight)
+
+### SQLite import to PostgreSQL
+
+Uploaded SQLite files are imported into PostgreSQL by a nightly CronJob at 00:10.
+Duplicates are prevented using a unique constraint on `ts` (timestamp) and `ON CONFLICT DO NOTHING`.
 
 ### Best-practice (least privilege)
 
