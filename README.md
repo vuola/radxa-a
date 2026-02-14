@@ -213,3 +213,130 @@ ls -l /var/lib/moxa/weather.db
 sqlite3 -header -column /var/lib/moxa/weather.db "SELECT COUNT(*) FROM weather;"
 sudo systemctl status moxa-archive-upload.timer --no-pager
 ```
+
+## MQTT service (heating control)
+
+The weather stack also exposes an MQTT broker (Eclipse Mosquitto) in the `weather` namespace. A NodePort service is published on the LAN at port 31884 (TCP) and is used to switch the geothermal pump & water warmer between **ALLOW** (external grid power allowed) and **PROHIBIT** (external grid power disallowed during peak tariff hours).
+
+Switching commands to test manually in the home domain:
+
+```
+mosquitto_pub -h 192.168.68.111 -p 31884 -t ivt/heating/mode/set -m PROHIBIT -q 1 -r
+mosquitto_pub -h 192.168.68.111 -p 31884 -t ivt/heating/mode/set -m ALLOW -q 1 -r
+```
+This works also from radxa-a.local command prompt in case the mosquitto services are installed:
+```
+sudo apt update
+sudo apt install mosquitto-clients -y
+```
+
+## ENTSO-E day-ahead price retrieval
+
+The weather stack maintains a local copy of day-ahead energy prices for Finland from the ENTSO-E (European Network of Transmission System Operators for Electricity) API.
+
+### Overview
+
+- **Data source**: ENTSO-E Transparency Platform API (day-ahead prices, document type A44)
+- **Region**: Finland (domain 10YFI-1--------U)
+- **Frequency**: 15-minute intervals aligned to 00, 15, 30, 45 minutes past the hour
+- **Storage**: PostgreSQL `entsoe_prices` table (persisted to /media/ssd250/weather/postgres)
+- **Update schedule**: Daily at 14:10, 15:10, 16:10 CET (with retries for delayed API publication)
+
+### Database schema
+
+Table: `entsoe_prices`
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `ts` | TIMESTAMPTZ PRIMARY KEY | UTC timestamp, must align to 15-minute boundaries (minutes 0, 15, 30, 45) |
+| `price_eur_per_mwh` | DOUBLE PRECISION NULL | Day-ahead electricity price in €/MWh; forward-filled with previous value if ENTSO-E has gaps |
+| `created_at` | TIMESTAMPTZ | Auto-set on row creation |
+| `updated_at` | TIMESTAMPTZ | Auto-set on row creation; updated on upsert |
+
+15-minute alignment is enforced via CHECK constraint:
+```sql
+date_trunc('minute', ts) = ts AND date_part('minute', ts) IN (0, 15, 30, 45)
+```
+
+### CronJob configuration
+
+**Resource**: CronJob `entsoe-dayahead-import` in namespace `weather`
+
+**Schedule**: `"10 14,15,16 * * *"` (daily at 14:10, 15:10, 16:10 CET)
+
+**Behavior**:
+1. Fetches next day's forecast prices from ENTSO-E API
+2. Parses XML response and extracts prices by 15-minute timestamp
+3. Forward-fills any gaps (missing time slots) with the previous 15-minute slot's price
+4. Upserts rows into `entsoe_prices` table (INSERT ... ON CONFLICT DO UPDATE)
+5. Completes in ~17 seconds
+
+**Environment variables** (from secrets):
+- `PGHOST`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`: PostgreSQL connection (from secret `weather-db`)
+- `ENTSOE_API_KEY`: ENTSO-E API token (from secret `entsoe-api`)
+- `ENTSOE_IN_DOMAIN`, `ENTSOE_OUT_DOMAIN`: Market area code (10YFI-1--------U for Finland)
+- `ENTSOE_MARKET_AGREEMENT`: Contract type (A01 for day-ahead)
+- `ENTSOE_TZ`: Local timezone (Europe/Helsinki)
+
+### API key setup
+
+The ENTSO-E API requires authentication. To set up:
+
+1. Register at https://www.entsoe.eu/data/energy-identification-codes-eic/
+2. Request API access and receive your security token
+3. Store it in the Kubernetes secret:
+
+```bash
+kubectl -n weather create secret generic entsoe-api \
+  --from-literal=API_KEY='<your-token-here>' \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
+
+### Manual import test
+
+To manually trigger an import (useful for testing or backfilling):
+
+```bash
+kubectl -n weather create job --from=cronjob/entsoe-dayahead-import entsoe-test-import-$(date +%s)
+```
+
+Monitor the job:
+
+```bash
+kubectl -n weather logs job/entsoe-test-import-<timestamp>
+```
+
+### Verification queries
+
+Check table size:
+
+```bash
+kubectl -n weather exec statefulset/weather-postgres -- psql -U weather -d weather -c \
+  "SELECT COUNT(*) as rows, MIN(ts) as earliest, MAX(ts) as latest FROM entsoe_prices;"
+```
+
+Check for gaps (NULL prices):
+
+```bash
+kubectl -n weather exec statefulset/weather-postgres -- psql -U weather -d weather -c \
+  "SELECT COUNT(*) as missing FROM entsoe_prices WHERE price_eur_per_mwh IS NULL;"
+```
+
+View recent prices (in local timezone):
+
+```bash
+kubectl -n weather exec statefulset/weather-postgres -- psql -U weather -d weather -c \
+  "SELECT ts AT TIME ZONE 'Europe/Helsinki' as local_time, price_eur_per_mwh FROM entsoe_prices \
+   ORDER BY ts DESC LIMIT 96;"
+```
+
+### Gap-filling strategy
+
+If ENTSO-E publishes data with missing time slots (which occasionally occurs due to data feed delays), the importer applies forward-fill: missing 15-minute slots receive the price of the most recent preceding slot with data.
+
+Example:
+- 14:30 = 130.00 €/MWh (from ENTSO-E)
+- 14:45 = NULL in ENTSO-E → forward-filled to 130.00 €/MWh
+- 15:00 = 130.01 €/MWh (from ENTSO-E)
+
+This matches ENTSO-E's own behavior and ensures continuous data coverage.
