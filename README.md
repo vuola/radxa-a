@@ -9,7 +9,7 @@ This repository documents the weather archive stack running on radxa-a.local and
   - NGINX + PHP for a simple web UI and ingest endpoint
   - Daily DB backups to /media/ssd250/weather/backups
 - **moxa.local** keeps the live SQLite database and uploads an online backup once per day.
-- **Backup retention**: keep the **latest 3 dumps** (today + 2 previous) via retention-based rotation to balance disk usage and safety.
+- **Backup retention**: keep the **latest 7 dumps** via retention-based rotation to balance disk usage and safety.
 
 ## Components on radxa-a.local
 
@@ -19,18 +19,22 @@ Where to edit:
 
 - **Local/custom changes** belong in /home/vuola/.kube-cron-jobs/local-manifests/
   - Example: /home/vuola/.kube-cron-jobs/local-manifests/weather.yaml
-- **Upstream/base manifests** are pulled into /home/vuola/.kube-cron-jobs/pubcluster/ and should not be edited locally.
+- **Web files** live in /home/vuola/.kube-cron-jobs/weather-web/
+- **Importer scripts** live in /home/vuola/.kube-cron-jobs/weather-scripts/
 
 How updates are applied:
 
 - /home/vuola/.kube-cron-jobs/update-cluster.sh renders HOSTNAME placeholders and copies the rendered YAML into
   /var/lib/rancher/k3s/server/manifests for auto-apply by k3s.
-- Local manifests are applied on every run and override pubcluster files with the same filename.
+- The script also generates ConfigMaps from the files in weather-web/ and weather-scripts/ and writes them into
+  /home/vuola/.kube-cron-jobs/local-manifests before applying.
+- Local manifests are applied on every run.
 
 Correct process:
 
 1. Edit /home/vuola/.kube-cron-jobs/local-manifests/*.yaml (use HOSTNAME where needed).
-2. Run /home/vuola/.kube-cron-jobs/update-cluster.sh (or wait for the cron run).
+2. Edit web files in /home/vuola/.kube-cron-jobs/weather-web/ and scripts in /home/vuola/.kube-cron-jobs/weather-scripts/.
+3. Run /home/vuola/.kube-cron-jobs/update-cluster.sh (or wait for the cron run).
 
 ### Weather namespace resources
 
@@ -40,6 +44,9 @@ Deployed in namespace `weather`:
 - **Service**: weather-postgres (ClusterIP:5432)
 - **CronJob**: weather-postgres-backup (nightly backups)
 - **CronJob**: weather-sqlite-import (imports uploaded SQLite to PostgreSQL)
+- **CronJob**: entsoe-dayahead-import (day-ahead prices)
+- **CronJob**: fmi-forecast-import (weather forecast)
+- **CronJob**: create-fusion-view (refreshes SQL view for the web UI)
 - **Deployment**: weather-web (NGINX + PHP-FPM)
 - **Service**: weather-web (ClusterIP:80)
 - **Ingress**: weather-web (Traefik)
@@ -50,10 +57,17 @@ Deployed in namespace `weather`:
 - Backups: /media/ssd250/weather/backups
 - Upload inbox: /media/ssd250/weather/inbox
 
+### Script locations (radxa-a.local)
+
+- ENTSO-E importer: /home/vuola/.kube-cron-jobs/weather-scripts/entsoe_import.py
+- FMI importer: /home/vuola/.kube-cron-jobs/weather-scripts/fmi_forecast_import.py
+- SQLite import: /home/vuola/.kube-cron-jobs/weather-scripts/sqlite_import.py
+- Fusion view SQL: /home/vuola/.kube-cron-jobs/weather-scripts/create_fusion_view.sql
+
 ### Endpoints
 
--- Web UI: http://radxa-a.local/
--- Ingest endpoint:
+- Web UI: http://radxa-a.local/
+- Ingest endpoint:
   - POST JSON to http://radxa-a.local/ingest.php
   - Upload SQLite file as multipart field `sqlite` to the same endpoint
 

@@ -1,4 +1,5 @@
 import os
+import sys
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone, time
 from zoneinfo import ZoneInfo
@@ -6,6 +7,8 @@ from zoneinfo import ZoneInfo
 import psycopg2
 from psycopg2.extras import execute_batch
 import requests
+
+print("Starting ENTSO-E import script", file=sys.stderr, flush=True)
 
 api_key = os.environ["ENTSOE_API_KEY"]
 in_domain = os.environ.get("ENTSOE_IN_DOMAIN", "10YFI-1--------U")
@@ -20,10 +23,8 @@ end_local = start_local + timedelta(days=1)
 start_utc = start_local.astimezone(timezone.utc)
 end_utc = end_local.astimezone(timezone.utc)
 
-
 def fmt(dt: datetime) -> str:
     return dt.strftime("%Y%m%d%H%M")
-
 
 params = {
     "securityToken": api_key,
@@ -40,7 +41,6 @@ resp.raise_for_status()
 
 root = ET.fromstring(resp.content)
 
-
 def parse_resolution(res_text: str) -> timedelta:
     if res_text == "PT15M":
         return timedelta(minutes=15)
@@ -49,7 +49,6 @@ def parse_resolution(res_text: str) -> timedelta:
     if res_text == "PT60M":
         return timedelta(minutes=60)
     raise ValueError(f"Unsupported resolution: {res_text}")
-
 
 price_by_ts = {}
 for ts_node in root.findall(".//{*}TimeSeries"):
@@ -113,9 +112,11 @@ insert_sql = """
 INSERT INTO entsoe_prices (ts, price_eur_per_mwh)
 VALUES (%s, %s)
 ON CONFLICT (ts) DO UPDATE
-  SET price_eur_per_mwh = COALESCE(EXCLUDED.price_eur_per_mwh, entsoe_prices.price_eur_per_mwh),
-      updated_at = CASE WHEN EXCLUDED.price_eur_per_mwh IS NOT NULL THEN now() ELSE entsoe_prices.updated_at END;
+  SET price_eur_per_mwh = EXCLUDED.price_eur_per_mwh,
+      updated_at = now();
 """
 execute_batch(cur, insert_sql, rows, page_size=500)
+print(f"Successfully imported {len(rows)} price rows", file=sys.stderr, flush=True)
 cur.close()
 pg_conn.close()
+print("ENTSO-E import complete", file=sys.stderr, flush=True)

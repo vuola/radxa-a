@@ -1,0 +1,130 @@
+import os
+import sys
+import requests
+import psycopg2
+from psycopg2.extras import execute_batch
+from lxml import etree
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+
+print("Starting FMI forecast import", file=sys.stderr, flush=True)
+
+lat = os.environ.get("FMI_LAT", "60.32128967082279")
+lon = os.environ.get("FMI_LON", "24.87694349774082")
+
+wfs_url = "https://opendata.fmi.fi/wfs"
+params = {
+    "service": "WFS",
+    "version": "2.0.0",
+    "request": "getFeature",
+    "storedquery_id": "fmi::forecast::harmonie::surface::point::simple",
+    "latlon": f"{lat},{lon}",
+}
+
+try:
+    resp = requests.get(wfs_url, params=params, timeout=120)
+    resp.raise_for_status()
+except Exception as e:
+    print(f"Error fetching FMI data: {e}", file=sys.stderr, flush=True)
+    sys.exit(1)
+
+root = etree.fromstring(resp.content)
+ns = {
+    "wfs": "http://www.opengis.net/wfs/2.0",
+    "BsWfs": "http://xml.fmi.fi/schema/wfs/2.0",
+    "gml": "http://www.opengis.net/gml/3.2",
+}
+
+tz_utc = timezone.utc
+
+try:
+    pg_conn = psycopg2.connect(
+        host=os.environ["PGHOST"],
+        dbname=os.environ["PGDATABASE"],
+        user=os.environ["PGUSER"],
+        password=os.environ["PGPASSWORD"],
+    )
+    pg_conn.autocommit = True
+    cur = pg_conn.cursor()
+except Exception as e:
+    print(f"DB connection failed: {e}", file=sys.stderr, flush=True)
+    sys.exit(1)
+
+cur.execute(
+    """
+    CREATE TABLE IF NOT EXISTS fmi_forecast (
+      ts TIMESTAMPTZ PRIMARY KEY,
+      temperature_c DOUBLE PRECISION NULL,
+      wind_speed_ms DOUBLE PRECISION NULL,
+      wind_direction_deg DOUBLE PRECISION NULL,
+      cloud_cover_pct DOUBLE PRECISION NULL,
+      shortwave_radiation_w_m2 DOUBLE PRECISION NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    """
+)
+
+data_by_param_ts = {}
+for member in root.findall(".//wfs:member", ns):
+    bs_point_tv = member.find(".//BsWfs:BsWfsElement", ns)
+    if bs_point_tv is None:
+        continue
+
+    time_elem = bs_point_tv.find(".//BsWfs:Time", ns)
+    param_elem = bs_point_tv.find(".//BsWfs:ParameterName", ns)
+    value_elem = bs_point_tv.find(".//BsWfs:ParameterValue", ns)
+
+    if time_elem is None or param_elem is None or value_elem is None:
+        continue
+
+    time_text = time_elem.text
+    param_name = param_elem.text
+    value_text = value_elem.text
+
+    if not time_text or not param_name or not value_text:
+        continue
+
+    try:
+        dt = datetime.fromisoformat(time_text.replace("Z", "+00:00"))
+        value = float(value_text)
+    except:
+        continue
+
+    ts_key = dt.isoformat()
+    if ts_key not in data_by_param_ts:
+        data_by_param_ts[ts_key] = {"ts": dt}
+
+    data_by_param_ts[ts_key][param_name] = value
+
+rows = []
+for ts_key, data in data_by_param_ts.items():
+    dt = data["ts"]
+    temp = data.get("Temperature")
+    wind_speed = data.get("WindSpeedMS")
+    wind_dir = data.get("WindDirection")
+    cloud = data.get("TotalCloudCover")
+    radiation = data.get("RadiationGlobalAccumulation") or data.get("RadiationLWAccumulation")
+
+    rows.append((dt.isoformat(), temp, wind_speed, wind_dir, cloud, radiation))
+
+if rows:
+    insert_sql = """
+    INSERT INTO fmi_forecast (ts, temperature_c, wind_speed_ms, wind_direction_deg, cloud_cover_pct, shortwave_radiation_w_m2)
+    VALUES (%s, %s, %s, %s, %s, %s)
+    ON CONFLICT (ts) DO UPDATE
+      SET temperature_c = EXCLUDED.temperature_c,
+          wind_speed_ms = EXCLUDED.wind_speed_ms,
+          wind_direction_deg = EXCLUDED.wind_direction_deg,
+          cloud_cover_pct = EXCLUDED.cloud_cover_pct,
+          shortwave_radiation_w_m2 = EXCLUDED.shortwave_radiation_w_m2,
+          updated_at = now();
+    """
+    execute_batch(cur, insert_sql, rows, page_size=100)
+    print(f"Successfully imported {len(rows)} FMI forecast rows", file=sys.stderr, flush=True)
+else:
+    print("No FMI forecast data rows extracted", file=sys.stderr, flush=True)
+
+cur.close()
+pg_conn.close()
+print("FMI forecast import complete", file=sys.stderr, flush=True)

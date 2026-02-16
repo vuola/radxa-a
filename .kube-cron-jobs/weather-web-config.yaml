@@ -1,0 +1,234 @@
+apiVersion: v1
+data:
+  export.php: "<?php\n$readSecret = function(string $path, string $fallback = ''):
+    string {\n  if (is_readable($path)) {\n    return trim((string)file_get_contents($path));\n
+    \ }\n  return $fallback;\n};\n\n$host = getenv('DB_HOST') ?: 'weather-postgres';\n$db
+    = getenv('DB_NAME') ?: $readSecret('/var/secret/MYSQL_DATABASE', 'weather');\n$user
+    = getenv('DB_USER') ?: $readSecret('/var/secret/MYSQL_USER', 'weather');\n$pass
+    = getenv('DB_PASS') ?: $readSecret('/var/secret/MYSQL_PASSWORD', '');\n\n$dsn
+    = \"pgsql:host={$host};dbname={$db}\";\n\ntry {\n    $pdo = new PDO($dsn, $user,
+    $pass, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);\n} catch (Throwable $e)
+    {\n    http_response_code(500);\n    echo \"DB connection failed\";\n    exit;\n}\n\n$tz
+    = new DateTimeZone('Europe/Helsinki');\n$nowLocal = new DateTimeImmutable('now',
+    $tz);\n$dateParam = isset($_GET['date']) ? strtolower(trim((string)$_GET['date']))
+    : '';\n$dayParam = isset($_GET['day']) ? trim((string)$_GET['day']) : '';\n\nif
+    ($dayParam !== '') {\n  $date = DateTimeImmutable::createFromFormat('Y-m-d', $dayParam,
+    $tz);\n  if (!$date) {\n    http_response_code(400);\n    echo \"Invalid day format.
+    Use YYYY-MM-DD.\";\n    exit;\n  }\n  $startLocal = $date->setTime(0, 0, 0);\n}
+    elseif ($dateParam === 'tomorrow') {\n  $startLocal = $nowLocal->modify('+1 day')->setTime(0,
+    0, 0);\n} else {\n  $startLocal = $nowLocal->setTime(0, 0, 0);\n}\n\n$endLocal
+    = $startLocal->modify('+1 day');\n$startUtc = $startLocal->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d
+    H:i:sP');\n$endUtc = $endLocal->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d
+    H:i:sP');\n\n$stmt = $pdo->prepare(\n  \"SELECT ts, price_eur_per_mwh, temperature_c,
+    wind_speed_ms, wind_direction_deg, cloud_cover_pct, shortwave_radiation_w_m2 FROM
+    weather_fusion WHERE ts >= :start AND ts < :end ORDER BY ts ASC\"\n);\n$stmt->execute([':start'
+    => $startUtc, ':end' => $endUtc]);\n$rows = $stmt->fetchAll(PDO::FETCH_ASSOC);\n\nheader('Content-Type:
+    text/csv; charset=utf-8');\nheader('Content-Disposition: attachment; filename=\"weather_fusion_'
+    . $startLocal->format('Y-m-d') . '.csv\"');\n\n$out = fopen('php://output', 'w');\nfputcsv($out,
+    ['timestamp_utc', 'timestamp_local', 'price_eur_per_mwh', 'price_cent_per_kwh_incl_margin_vat',
+    'temperature_c', 'wind_speed_ms', 'wind_direction_deg', 'cloud_cover_pct', 'shortwave_radiation_w_m2']);\n\nforeach
+    ($rows as $row) {\n    $tsLocal = (new DateTimeImmutable($row['ts']))->setTimezone($tz);\n
+    \   $price = $row['price_eur_per_mwh'];\n    $priceConverted = null;\n    if ($price
+    !== null) {\n      $wholesaleCentPerKwh = ((float)$price) * 0.1;\n      $withMargin
+    = $wholesaleCentPerKwh + 0.46;\n      $priceConverted = $withMargin * 1.255;\n
+    \   }\n    \n    $temp = $row['temperature_c'] !== null ? number_format((float)$row['temperature_c'],
+    1, '.', '') : '';\n    $wind = $row['wind_speed_ms'] !== null ? number_format((float)$row['wind_speed_ms'],
+    1, '.', '') : '';\n    $dir = $row['wind_direction_deg'] !== null ? number_format((float)$row['wind_direction_deg'],
+    0, '.', '') : '';\n    $cloud = $row['cloud_cover_pct'] !== null ? number_format((float)$row['cloud_cover_pct'],
+    0, '.', '') : '';\n    $rad = $row['shortwave_radiation_w_m2'] !== null ? number_format((float)$row['shortwave_radiation_w_m2'],
+    0, '.', '') : '';\n    \n    fputcsv($out, [\n      $row['ts'],\n      $tsLocal->format('Y-m-d
+    H:i:s'),\n      $price,\n      $priceConverted,\n      $temp,\n      $wind,\n
+    \     $dir,\n      $cloud,\n      $rad\n    ]);\n}\nfclose($out);\n?>\n"
+  index.php: "<?php\n$readSecret = function(string $path, string $fallback = ''):
+    string {\n  if (is_readable($path)) {\n    return trim((string)file_get_contents($path));\n
+    \ }\n  return $fallback;\n};\n\n$host = getenv('DB_HOST') ?: 'weather-postgres';\n$db
+    = getenv('DB_NAME') ?: $readSecret('/var/secret/MYSQL_DATABASE', 'weather');\n$user
+    = getenv('DB_USER') ?: $readSecret('/var/secret/MYSQL_USER', 'weather');\n$pass
+    = getenv('DB_PASS') ?: $readSecret('/var/secret/MYSQL_PASSWORD', '');\n\n$dsn
+    = \"pgsql:host={$host};dbname={$db}\";\n\ntry {\n    $pdo = new PDO($dsn, $user,
+    $pass, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);\n} catch (Throwable $e)
+    {\n    http_response_code(500);\n    echo \"DB connection failed\";\n    exit;\n}\n\n$pdo->exec(\"CREATE
+    TABLE IF NOT EXISTS weather (id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ DEFAULT
+    now(), temperature_c DOUBLE PRECISION NULL, dew_point_c DOUBLE PRECISION NULL,
+    relative_humidity DOUBLE PRECISION NULL, pressure_hpa DOUBLE PRECISION NULL, wind_speed_ms
+    DOUBLE PRECISION NULL, wind_direction_deg DOUBLE PRECISION NULL, precip_mmph DOUBLE
+    PRECISION NULL, energy_today_wh BIGINT NULL, pv_feed_in_w INTEGER NULL, battery_soc_pct
+    INTEGER NULL, active_power_pcc_w INTEGER NULL, bat_charge_w INTEGER NULL, bat_discharge_w
+    INTEGER NULL, sma_json JSONB NULL, merged_at TIMESTAMPTZ NULL, pushed_at TIMESTAMPTZ
+    NULL)\");\n$pdo->exec(\"CREATE TABLE IF NOT EXISTS entsoe_prices (ts TIMESTAMPTZ
+    PRIMARY KEY, price_eur_per_mwh DOUBLE PRECISION NULL, created_at TIMESTAMPTZ NOT
+    NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), CONSTRAINT
+    entsoe_prices_ts_15m CHECK (date_trunc('minute', ts) = ts AND date_part('minute',
+    ts) IN (0, 15, 30, 45)) )\");\n\n$tz = new DateTimeZone('Europe/Helsinki');\n$nowLocal
+    = new DateTimeImmutable('now', $tz);\n$dateParam = isset($_GET['date']) ? strtolower(trim((string)$_GET['date']))
+    : '';\n$dayParam = isset($_GET['day']) ? trim((string)$_GET['day']) : '';\n\nif
+    ($dayParam !== '') {\n  $date = DateTimeImmutable::createFromFormat('Y-m-d', $dayParam,
+    $tz);\n  if (!$date) {\n    http_response_code(400);\n    echo \"Invalid day format.
+    Use YYYY-MM-DD.\";\n    exit;\n  }\n  $startLocal = $date->setTime(0, 0, 0);\n}
+    elseif ($dateParam === 'tomorrow') {\n  $startLocal = $nowLocal->modify('+1 day')->setTime(0,
+    0, 0);\n} else {\n  $startLocal = $nowLocal->setTime(0, 0, 0);\n}\n\n$endLocal
+    = $startLocal->modify('+1 day');\n\n$startUtc = $startLocal->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d
+    H:i:sP');\n$endUtc = $endLocal->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d
+    H:i:sP');\n\n$stmt = $pdo->prepare(\n  \"SELECT ts, price_eur_per_mwh, temperature_c,
+    wind_speed_ms, wind_direction_deg, cloud_cover_pct, shortwave_radiation_w_m2,
+    price_updated_at FROM weather_fusion WHERE ts >= :start AND ts < :end ORDER BY
+    ts ASC\"\n);\n$stmt->execute([':start' => $startUtc, ':end' => $endUtc]);\n$rows
+    = $stmt->fetchAll(PDO::FETCH_ASSOC);\n\nheader('Content-Type: text/html; charset=utf-8');\necho
+    \"<!doctype html>\";\necho \"<html lang=\\\"en\\\"><head><meta charset=\\\"utf-8\\\">\";\necho
+    \"<meta name=\\\"viewport\\\" content=\\\"width=device-width, initial-scale=1\\\">\";\necho
+    \"<title>Electricity & Weather Fusion (Finland)</title>\";\necho \"<style>body{font-family:system-ui,-apple-system,Segoe
+    UI,Roboto,Ubuntu,sans-serif;margin:2rem;color:#111}table{border-collapse:collapse;width:100%;max-width:1200px}th,td{padding:.5rem
+    .75rem;border-bottom:1px solid #ddd;text-align:left}th{background:#f6f6f6}caption{caption-side:top;text-align:left;font-weight:600;margin-bottom:.5rem}td.num{text-align:right}</style>\";\necho
+    \"</head><body>\";\necho \"<h1>Electricity & Weather Fusion (Finland)</h1>\";\n$todayLink
+    = '?date=today';\n$tomorrowLink = '?date=tomorrow';\necho \"<p>Date: \" . htmlspecialchars($startLocal->format('Y-m-d'))
+    . \" (Europe/Helsinki)</p>\";\necho \"<p>Toggle: <a href=\\\"{$todayLink}\\\">Today</a>
+    | <a href=\\\"{$tomorrowLink}\\\">Tomorrow</a></p>\";\n\nif (!$rows) {\n  echo
+    \"<p>No data found for this day.</p>\";\n} else {\n  echo \"<table><caption>Electricity
+    prices with interpolated weather forecast (15-min resolution)</caption>\";\n  echo
+    \"<thead><tr><th>Time</th><th>Price (cent/kWh)</th><th>Temp (°C)</th><th>Wind
+    (m/s)</th><th>Dir (°)</th><th>Cloud (%)</th><th>Rad (W/m²)</th></tr></thead><tbody>\";\n
+    \ foreach ($rows as $row) {\n    $tsLocal = (new DateTimeImmutable($row['ts']))->setTimezone($tz);\n
+    \   $price = $row['price_eur_per_mwh'];\n    if ($price === null) {\n      $priceText
+    = '-';\n    } else {\n      $wholesaleCentPerKwh = ((float)$price) * 0.1;\n      $withMargin
+    = $wholesaleCentPerKwh + 0.46;\n      $withVat = $withMargin * 1.255;\n      $priceText
+    = number_format($withVat, 1, '.', '');\n    }\n    \n    $temp = $row['temperature_c'];\n
+    \   $wind = $row['wind_speed_ms'];\n    $dir = $row['wind_direction_deg'];\n    $cloud
+    = $row['cloud_cover_pct'];\n    $rad = $row['shortwave_radiation_w_m2'];\n    \n
+    \   $tempText = $temp === null ? '-' : number_format((float)$temp, 1, '.', '');\n
+    \   $windText = $wind === null ? '-' : number_format((float)$wind, 1, '.', '');\n
+    \   $dirText = $dir === null ? '-' : number_format((float)$dir, 0, '.', '');\n
+    \   $cloudText = $cloud === null ? '-' : number_format((float)$cloud, 0, '.',
+    '');\n    $radText = $rad === null ? '-' : number_format((float)$rad, 0, '.',
+    '');\n    \n    echo \"<tr>\";\n    echo \"<td>\" . htmlspecialchars($tsLocal->format('H:i'))
+    . \"</td>\";\n    echo \"<td class=\\\"num\\\">\" . htmlspecialchars($priceText)
+    . \"</td>\";\n    echo \"<td class=\\\"num\\\">\" . htmlspecialchars($tempText)
+    . \"</td>\";\n    echo \"<td class=\\\"num\\\">\" . htmlspecialchars($windText)
+    . \"</td>\";\n    echo \"<td class=\\\"num\\\">\" . htmlspecialchars($dirText)
+    . \"</td>\";\n    echo \"<td class=\\\"num\\\">\" . htmlspecialchars($cloudText)
+    . \"</td>\";\n    echo \"<td class=\\\"num\\\">\" . htmlspecialchars($radText)
+    . \"</td>\";\n    echo \"</tr>\";\n  }\n  echo \"</tbody></table>\";\n}\n\necho
+    \"<p style=\\\"margin-top:1rem;color:#555\\\">POST JSON to /ingest.php or upload
+    a sqlite file using field name 'sqlite'.</p>\";\necho \"<p style=\\\"color:#555\\\">Export
+    data: <a href=\\\"/export.php\\\">CSV (today)</a> | <a href=\\\"/export.php?date=tomorrow\\\">CSV
+    (tomorrow)</a></p>\";\necho \"</body></html>\";\n?>\n"
+  ingest.php: |
+    <?php
+    if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+        http_response_code(405);
+        echo "Use POST";
+        exit;
+    }
+
+    if (!empty($_FILES['sqlite']['tmp_name'])) {
+        $targetDir = '/var/inbox';
+        if (!is_dir($targetDir)) {
+            mkdir($targetDir, 0775, true);
+        }
+        $target = $targetDir . '/' . basename($_FILES['sqlite']['name']);
+        if (!move_uploaded_file($_FILES['sqlite']['tmp_name'], $target)) {
+            http_response_code(500);
+            echo "Failed to save upload";
+            exit;
+        }
+        echo "Saved to inbox";
+        exit;
+    }
+
+    $payload = file_get_contents('php://input');
+    $items = json_decode($payload, true);
+    if (!is_array($items)) {
+        http_response_code(400);
+        echo "Invalid JSON";
+        exit;
+    }
+
+    $readSecret = function(string $path, string $fallback = ''): string {
+      if (is_readable($path)) {
+        return trim((string)file_get_contents($path));
+      }
+      return $fallback;
+    };
+
+    $host = getenv('DB_HOST') ?: 'weather-postgres';
+    $db = getenv('DB_NAME') ?: $readSecret('/var/secret/MYSQL_DATABASE', 'weather');
+    $user = getenv('DB_USER') ?: $readSecret('/var/secret/MYSQL_USER', 'weather');
+    $pass = getenv('DB_PASS') ?: $readSecret('/var/secret/MYSQL_PASSWORD', '');
+
+    $dsn = "pgsql:host={$host};dbname={$db}";
+
+    try {
+        $pdo = new PDO($dsn, $user, $pass, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+    } catch (Throwable $e) {
+        http_response_code(500);
+        echo "DB connection failed";
+        exit;
+    }
+
+    $pdo->exec("CREATE TABLE IF NOT EXISTS weather (id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ DEFAULT now(), temperature_c DOUBLE PRECISION NULL, dew_point_c DOUBLE PRECISION NULL, relative_humidity DOUBLE PRECISION NULL, pressure_hpa DOUBLE PRECISION NULL, wind_speed_ms DOUBLE PRECISION NULL, wind_direction_deg DOUBLE PRECISION NULL, precip_mmph DOUBLE PRECISION NULL, energy_today_wh BIGINT NULL, pv_feed_in_w INTEGER NULL, battery_soc_pct INTEGER NULL, active_power_pcc_w INTEGER NULL, bat_charge_w INTEGER NULL, bat_discharge_w INTEGER NULL, sma_json JSONB NULL, merged_at TIMESTAMPTZ NULL, pushed_at TIMESTAMPTZ NULL)");
+    $pdo->exec("CREATE TABLE IF NOT EXISTS entsoe_prices (ts TIMESTAMPTZ PRIMARY KEY, price_eur_per_mwh DOUBLE PRECISION NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), CONSTRAINT entsoe_prices_ts_15m CHECK (date_trunc('minute', ts) = ts AND date_part('minute', ts) IN (0, 15, 30, 45)) )");
+    $stmtWithId = $pdo->prepare("INSERT INTO weather (id, ts, temperature_c, dew_point_c, relative_humidity, pressure_hpa, wind_speed_ms, wind_direction_deg, precip_mmph, energy_today_wh, pv_feed_in_w, battery_soc_pct, active_power_pcc_w, bat_charge_w, bat_discharge_w, sma_json, merged_at, pushed_at) VALUES (:id, :ts, :temperature_c, :dew_point_c, :relative_humidity, :pressure_hpa, :wind_speed_ms, :wind_direction_deg, :precip_mmph, :energy_today_wh, :pv_feed_in_w, :battery_soc_pct, :active_power_pcc_w, :bat_charge_w, :bat_discharge_w, :sma_json, :merged_at, :pushed_at) ON CONFLICT (id) DO UPDATE SET ts=EXCLUDED.ts, temperature_c=EXCLUDED.temperature_c, dew_point_c=EXCLUDED.dew_point_c, relative_humidity=EXCLUDED.relative_humidity, pressure_hpa=EXCLUDED.pressure_hpa, wind_speed_ms=EXCLUDED.wind_speed_ms, wind_direction_deg=EXCLUDED.wind_direction_deg, precip_mmph=EXCLUDED.precip_mmph, energy_today_wh=EXCLUDED.energy_today_wh, pv_feed_in_w=EXCLUDED.pv_feed_in_w, battery_soc_pct=EXCLUDED.battery_soc_pct, active_power_pcc_w=EXCLUDED.active_power_pcc_w, bat_charge_w=EXCLUDED.bat_charge_w, bat_discharge_w=EXCLUDED.bat_discharge_w, sma_json=EXCLUDED.sma_json, merged_at=EXCLUDED.merged_at, pushed_at=EXCLUDED.pushed_at");
+    $stmtNoId = $pdo->prepare("INSERT INTO weather (ts, temperature_c, dew_point_c, relative_humidity, pressure_hpa, wind_speed_ms, wind_direction_deg, precip_mmph, energy_today_wh, pv_feed_in_w, battery_soc_pct, active_power_pcc_w, bat_charge_w, bat_discharge_w, sma_json, merged_at, pushed_at) VALUES (:ts, :temperature_c, :dew_point_c, :relative_humidity, :pressure_hpa, :wind_speed_ms, :wind_direction_deg, :precip_mmph, :energy_today_wh, :pv_feed_in_w, :battery_soc_pct, :active_power_pcc_w, :bat_charge_w, :bat_discharge_w, :sma_json, :merged_at, :pushed_at)");
+
+    $inserted = 0;
+    foreach ($items as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+        $payload = [
+          ':ts' => $row['ts'] ?? null,
+          ':temperature_c' => $row['temperature_c'] ?? null,
+          ':dew_point_c' => $row['dew_point_c'] ?? null,
+          ':relative_humidity' => $row['relative_humidity'] ?? null,
+          ':pressure_hpa' => $row['pressure_hpa'] ?? null,
+          ':wind_speed_ms' => $row['wind_speed_ms'] ?? null,
+          ':wind_direction_deg' => $row['wind_direction_deg'] ?? null,
+          ':precip_mmph' => $row['precip_mmph'] ?? null,
+          ':energy_today_wh' => $row['energy_today_wh'] ?? null,
+          ':pv_feed_in_w' => $row['pv_feed_in_w'] ?? null,
+          ':battery_soc_pct' => $row['battery_soc_pct'] ?? null,
+          ':active_power_pcc_w' => $row['active_power_pcc_w'] ?? null,
+          ':bat_charge_w' => $row['bat_charge_w'] ?? null,
+          ':bat_discharge_w' => $row['bat_discharge_w'] ?? null,
+          ':sma_json' => isset($row['sma_json']) ? json_encode($row['sma_json']) : null,
+          ':merged_at' => $row['merged_at'] ?? null,
+          ':pushed_at' => $row['pushed_at'] ?? null,
+        ];
+        if (!empty($row['id'])) {
+          $payload[':id'] = $row['id'];
+          $stmtWithId->execute($payload);
+        } else {
+          $stmtNoId->execute($payload);
+        }
+        $inserted++;
+    }
+
+    echo "Inserted {$inserted} rows";
+    ?>
+  nginx.conf: |
+    server {
+      listen 0.0.0.0:8080;
+      server_name _;
+
+      client_max_body_size 256m;
+
+      root /app;
+      index index.php;
+
+      location / {
+        try_files $uri /index.php?$query_string;
+      }
+
+      location ~ \.php$ {
+        fastcgi_pass 127.0.0.1:9000;
+        fastcgi_index index.php;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME /app$fastcgi_script_name;
+      }
+    }
+  php-ext.ini: |
+    extension=pdo_pgsql
+    extension=pgsql
+kind: ConfigMap
+metadata:
+  name: weather-web-config
+  namespace: weather

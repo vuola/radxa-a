@@ -1,0 +1,24 @@
+apiVersion: v1
+data:
+  create_fusion_view.sql: "CREATE OR REPLACE VIEW weather_fusion AS\nSELECT \n  e.ts,\n
+    \ e.price_eur_per_mwh,\n  e.updated_at AS price_updated_at,\n  CASE \n    WHEN
+    EXTRACT(MINUTE FROM e.ts) = 0 THEN f1.temperature_c\n    ELSE f1.temperature_c
+    + (f2.temperature_c - f1.temperature_c) * (EXTRACT(MINUTE FROM e.ts) / 60.0)\n
+    \ END AS temperature_c,\n  CASE \n    WHEN EXTRACT(MINUTE FROM e.ts) = 0 THEN
+    f1.wind_speed_ms\n    ELSE f1.wind_speed_ms + (f2.wind_speed_ms - f1.wind_speed_ms)
+    * (EXTRACT(MINUTE FROM e.ts) / 60.0)\n  END AS wind_speed_ms,\n  CASE \n    WHEN
+    EXTRACT(MINUTE FROM e.ts) = 0 THEN f1.wind_direction_deg\n    ELSE f1.wind_direction_deg
+    + (f2.wind_direction_deg - f1.wind_direction_deg) * (EXTRACT(MINUTE FROM e.ts)
+    / 60.0)\n  END AS wind_direction_deg,\n  CASE \n    WHEN EXTRACT(MINUTE FROM e.ts)
+    = 0 THEN f1.cloud_cover_pct\n    ELSE f1.cloud_cover_pct + (f2.cloud_cover_pct
+    - f1.cloud_cover_pct) * (EXTRACT(MINUTE FROM e.ts) / 60.0)\n  END AS cloud_cover_pct,\n
+    \ CASE \n    WHEN EXTRACT(MINUTE FROM e.ts) = 0 THEN f1.shortwave_radiation_w_m2\n
+    \   ELSE f1.shortwave_radiation_w_m2 + (f2.shortwave_radiation_w_m2 - f1.shortwave_radiation_w_m2)
+    * (EXTRACT(MINUTE FROM e.ts) / 60.0)\n  END AS shortwave_radiation_w_m2\nFROM
+    entsoe_prices e\nLEFT JOIN fmi_forecast f1 ON date_trunc('hour', e.ts) = f1.ts\nLEFT
+    JOIN fmi_forecast f2 ON date_trunc('hour', e.ts) + interval '1 hour' = f2.ts\nORDER
+    BY e.ts;\n"
+kind: ConfigMap
+metadata:
+  name: create-fusion-view-script
+  namespace: weather

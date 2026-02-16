@@ -1,3 +1,0 @@
-[submodule ".kube-cron-jobs/pubcluster"]
-	path = .kube-cron-jobs/pubcluster
-	url = https://github.com/vuola/pubcluster

@@ -1,17 +1,64 @@
 #!/bin/bash
-REPO_URL="https://github.com/vuola/pubcluster"
-MAX_ATTEMPTS=5
-SLEEP_TIME=10
-
-attempt=1
-
 username="vuola"
 kube_cron_jobs_dir="/home/"$username"/.kube-cron-jobs"
-pubcluster_dir="$kube_cron_jobs_dir/pubcluster"
 manifests_dir="/var/lib/rancher/k3s/server/manifests"
 local_manifests_dir="$kube_cron_jobs_dir/local-manifests"
-timestamp_file="$kube_cron_jobs_dir/.timestamp"
+web_files_dir="$kube_cron_jobs_dir/weather-web"
+web_config_manifest="$local_manifests_dir/weather-web-config.yaml"
+scripts_dir="$kube_cron_jobs_dir/weather-scripts"
+entsoe_manifest="$local_manifests_dir/entsoe-importer-script.yaml"
+fmi_manifest="$local_manifests_dir/fmi-importer-script.yaml"
+sqlite_manifest="$local_manifests_dir/weather-sqlite-import-script.yaml"
+fusion_view_manifest="$local_manifests_dir/create-fusion-view-script.yaml"
 new_host="$(hostname)"
+
+generate_weather_web_config() {
+  if [ -d "$web_files_dir" ]; then
+    echo "Generating weather-web-config ConfigMap from: $web_files_dir"
+    kubectl create configmap weather-web-config \
+      --from-file=nginx.conf="$web_files_dir/nginx.conf" \
+      --from-file=index.php="$web_files_dir/index.php" \
+      --from-file=export.php="$web_files_dir/export.php" \
+      --from-file=ingest.php="$web_files_dir/ingest.php" \
+      --from-file=php-ext.ini="$web_files_dir/php-ext.ini" \
+      -n weather \
+      --dry-run=client -o yaml > "$web_config_manifest"
+  fi
+}
+
+generate_weather_script_configs() {
+  if [ -f "$scripts_dir/entsoe_import.py" ]; then
+    echo "Generating entsoe-importer-script ConfigMap from: $scripts_dir/entsoe_import.py"
+    kubectl create configmap entsoe-importer-script \
+      --from-file=entsoe_import.py="$scripts_dir/entsoe_import.py" \
+      -n weather \
+      --dry-run=client -o yaml > "$entsoe_manifest"
+  fi
+
+  if [ -f "$scripts_dir/fmi_forecast_import.py" ]; then
+    echo "Generating fmi-importer-script ConfigMap from: $scripts_dir/fmi_forecast_import.py"
+    kubectl create configmap fmi-importer-script \
+      --from-file=fmi_forecast_import.py="$scripts_dir/fmi_forecast_import.py" \
+      -n weather \
+      --dry-run=client -o yaml > "$fmi_manifest"
+  fi
+
+  if [ -f "$scripts_dir/sqlite_import.py" ]; then
+    echo "Generating weather-sqlite-import-script ConfigMap from: $scripts_dir/sqlite_import.py"
+    kubectl create configmap weather-sqlite-import-script \
+      --from-file=sqlite_import.py="$scripts_dir/sqlite_import.py" \
+      -n weather \
+      --dry-run=client -o yaml > "$sqlite_manifest"
+  fi
+
+  if [ -f "$scripts_dir/create_fusion_view.sql" ]; then
+    echo "Generating create-fusion-view-script ConfigMap from: $scripts_dir/create_fusion_view.sql"
+    kubectl create configmap create-fusion-view-script \
+      --from-file=create_fusion_view.sql="$scripts_dir/create_fusion_view.sql" \
+      -n weather \
+      --dry-run=client -o yaml > "$fusion_view_manifest"
+  fi
+}
 
 apply_local_manifests() {
   if [ -d "$local_manifests_dir" ]; then
@@ -36,64 +83,6 @@ if [ -f "secret.yaml" ]; then
    kubectl apply -f secret.yaml
 fi
 
-# Step 1: Check if .timestamp file exists in the current directory
-if [ -f "$timestamp_file" ]; then
-
-  # Step 2: Pull updates from the remote repository
-  cd "$pubcluster_dir"
-  git pull origin main --no-rebase
-  latest_update=$(git rev-list HEAD --count)
-  saved_timestamp=$(cat "$timestamp_file")
-
-  if [ "$latest_update" -gt "$saved_timestamp" ]; then
-
-    # Step 3: Update manifest
-    # work through all .yaml files in repository,
-    # replace all instances of string HOSTNAME by local hostname   
-    # and move files to k3s auto-manifest directory
-    for file in  *.yaml; do
-      echo "Applying pubcluster manifest: $file (HOSTNAME=$new_host)"
-      sudo sed "s/HOSTNAME/$new_host/g" "$file" > "$kube_cron_jobs_dir"/"$file"
-      sudo cp "$kube_cron_jobs_dir"/"$file" "$manifests_dir"/"$file"
-      if grep -q "HOSTNAME" "$kube_cron_jobs_dir"/"$file"; then
-        echo "  ! WARNING: HOSTNAME placeholder still present in $kube_cron_jobs_dir/$file"
-      fi
-    done
-    # Step 4: Write the latest update timestamp to .timestamp file
-    echo "$latest_update" > "$timestamp_file"
-  fi
-else
-
-# .timestamp file doesn't exist, clone the repository and create .timestamp file
-  while [ $attempt -le $MAX_ATTEMPTS ]; do
-      echo "Attempting to clone (Attempt $attempt)..."
-      git clone --branch main $REPO_URL "$pubcluster_dir"
-
-      if [ $? -eq 0 ]; then
-          echo "Clone successful!"
-
-	        cd "$pubcluster_dir"
- 	        # work through all .yaml files in repository,
- 	        # replace all instances of string HOSTNAME by local hostname
-          # and move files to k3s auto-manifest directory
-          for file in  *.yaml; do
-            sudo sed "s/HOSTNAME/$new_host/g" "$file" > "$kube_cron_jobs_dir"/"$file"
-            sudo cp "$kube_cron_jobs_dir"/"$file" "$manifests_dir"/"$file"
-          done
-          git rev-list HEAD --count > "$timestamp_file"
-          break
-      else
-          echo "Clone failed. Retrying in $SLEEP_TIME seconds..."
-          sleep $SLEEP_TIME
-          attempt=$((attempt + 1))
-      fi
-  done
-
-  if [ $attempt -gt $MAX_ATTEMPTS ]; then
-    echo "Max attempts reached. Clone unsuccessful."
-    exit 1  # Terminate the script with an error status
-  fi
-
-fi
-
+generate_weather_web_config
+generate_weather_script_configs
 apply_local_manifests
