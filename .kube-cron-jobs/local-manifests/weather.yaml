@@ -700,6 +700,10 @@ spec:
       template:
         spec:
           restartPolicy: OnFailure
+          hostAliases:
+            - ip: 192.168.68.127
+              hostnames:
+                - moxa.local
           containers:
             - name: moxa-weather-importer
               image: docker.io/library/python:3.11-slim

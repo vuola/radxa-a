@@ -46,6 +46,7 @@ Deployed in namespace `weather`:
 - **CronJob**: weather-sqlite-import (imports uploaded SQLite to PostgreSQL)
 - **CronJob**: entsoe-dayahead-import (day-ahead prices)
 - **CronJob**: fmi-forecast-import (weather forecast)
+- **CronJob**: moxa-weather-15min-import (15-minute weather averages from moxa.local)
 - **CronJob**: create-fusion-view (refreshes SQL view for the web UI)
 - **Deployment**: weather-web (NGINX + PHP-FPM)
 - **Service**: weather-web (ClusterIP:80)
@@ -61,6 +62,7 @@ Deployed in namespace `weather`:
 
 - ENTSO-E importer: /home/vuola/.kube-cron-jobs/weather-scripts/entsoe_import.py
 - FMI importer: /home/vuola/.kube-cron-jobs/weather-scripts/fmi_forecast_import.py
+- Moxa weather importer: /home/vuola/.kube-cron-jobs/weather-scripts/moxa_weather_import.py
 - SQLite import: /home/vuola/.kube-cron-jobs/weather-scripts/sqlite_import.py
 - Fusion view SQL: /home/vuola/.kube-cron-jobs/weather-scripts/create_fusion_view.sql
 
@@ -204,7 +206,15 @@ journalctl -u moxa-archive-upload.service -n 200 --no-pager
 
 ## DNS / mDNS notes
 
-If radxa-a.local cannot resolve moxa.local, enable mDNS on radxa-a.local:
+### K3s cluster and moxa.local
+
+The k3s cluster cannot resolve mDNS names (like moxa.local) from within pods. To work around this, the moxa weather CronJob uses a `hostAlias` to map `moxa.local` to its static IP address `192.168.68.127`.
+
+**Important**: Configure a DHCP reservation on your router to ensure moxa.local always gets IP `192.168.68.127`. Without a fixed reservation, the pod will fail to connect if moxa.local's IP changes.
+
+### Host system (radxa-a.local)
+
+If radxa-a.local cannot resolve moxa.local, enable mDNS:
 
 - Install `avahi-daemon` and `libnss-mdns`
 - Start and enable avahi
@@ -242,6 +252,105 @@ This works also from radxa-a.local command prompt in case the mosquitto services
 ```
 sudo apt update
 sudo apt install mosquitto-clients -y
+```
+
+## Moxa weather 15-minute averages
+
+The weather stack retrieves 15-minute averaged weather data from moxa.local's local weather station and integrates it into the fusion view alongside FMI forecasts and ENTSO-E prices.
+
+### Overview
+
+- **Data source**: moxa.local `/api/avg.php` endpoint (retrieves 15-minute averaged measurements from the weather station)
+- **Frequency**: Every 15 minutes at 00, 15, 30, 45 minute boundaries
+- **Storage**: PostgreSQL `moxa_weather_15min` table (persisted to /media/ssd250/weather/postgres)
+- **Update schedule**: CronJob runs at 00, 15, 30, 45 minute marks
+
+### Database schema
+
+Table: `moxa_weather_15min`
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `ts` | TIMESTAMPTZ PRIMARY KEY | UTC timestamp, aligned to 15-minute boundaries (minutes 0, 15, 30, 45) |
+| `temperature_c` | DOUBLE PRECISION | Instantaneous temperature in °C |
+| `dew_point_c` | DOUBLE PRECISION | Dew point in °C |
+| `relative_humidity` | DOUBLE PRECISION | Relative humidity as percentage (0–100) |
+| `pressure_hpa` | DOUBLE PRECISION | Atmospheric pressure in hPa |
+| `wind_speed_ms` | DOUBLE PRECISION | Wind speed in m/s |
+| `wind_direction_deg` | DOUBLE PRECISION | Wind direction in degrees (0–360) |
+| `precip_mmph` | DOUBLE PRECISION | Precipitation rate in mm/h |
+| `energy_today_wh` | BIGINT | PV energy generated today in Wh |
+| `pv_feed_in_w` | INTEGER | PV feed-in power in W |
+| `battery_soc_pct` | INTEGER | Battery state of charge in % |
+| `active_power_pcc_w` | INTEGER | Active power at point of common coupling in W |
+| `bat_charge_w` | INTEGER | Battery charge power in W |
+| `bat_discharge_w` | INTEGER | Battery discharge power in W |
+| `sma_json` | JSONB | SMA inverter register values as JSON (all keys averaged) |
+| `created_at` | TIMESTAMPTZ | Auto-set on row creation |
+| `updated_at` | TIMESTAMPTZ | Auto-set on row creation; updated on upsert |
+
+Timestamps are validated with a CHECK constraint:
+```sql
+date_trunc('minute', ts) = ts AND date_part('minute', ts) IN (0, 15, 30, 45)
+```
+
+### CronJob configuration
+
+**Resource**: CronJob `moxa-weather-15min-import` in namespace `weather`
+
+**Schedule**: `0,15,30,45 * * * *` (every 15 minutes at exact boundaries)
+
+**Behavior**:
+1. Calls moxa.local's `/api/avg.php?n=900&cols=<weather-parameters>` endpoint to retrieve 15-minute averages
+2. Aligns timestamps to current 15-minute boundary (00, 15, 30, or 45 minutes)
+3. Upserts rows into `moxa_weather_15min` table (INSERT ... ON CONFLICT DO UPDATE)
+4. Completes in ~2–5 seconds
+
+**Environment variables** (from secrets):
+- `PGHOST`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`: PostgreSQL connection (from secret `weather-db`)
+- `MOXA_API_URL`: Base URL of moxa.local (default: `http://moxa.local`)
+
+### Integration with fusion view
+
+The `weather_fusion` view now combines moxa instant weather data with FMI forecasts and ENTSO-E prices:
+
+**FMI forecast columns** (prefixed with `fc_` to distinguish from moxa instant readings):
+- `fc_temperature_c` — Interpolated FMI forecast temperature
+- `fc_wind_speed_ms` — Interpolated FMI forecast wind speed
+- `fc_wind_direction_deg` — Interpolated FMI forecast wind direction
+- `fc_cloud_cover_pct` — Interpolated FMI forecast cloud cover
+- `fc_shortwave_radiation_w_m2` — Interpolated FMI forecast radiation
+
+**Moxa instant weather columns** (no prefix, at 15-minute boundaries):
+- Temperature, dew point, humidity, pressure, wind speed, wind direction, precipitation
+- PV energy, feed-in power, battery state, active power, charge/discharge power
+- SMA inverter register values (as JSON)
+
+Moxa data is aligned to the same 15-minute timestamps as ENTSO-E price points, allowing seamless time-series analysis of prices, forecasts, and actual weather conditions.
+
+### Verification queries
+
+Check table size:
+
+```bash
+kubectl -n weather exec statefulset/weather-postgres -- psql -U weather -d weather -c \
+  "SELECT COUNT(*) as rows, MIN(ts) as earliest, MAX(ts) as latest FROM moxa_weather_15min;"
+```
+
+View recent 15-minute averages:
+
+```bash
+kubectl -n weather exec statefulset/weather-postgres -- psql -U weather -d weather -c \
+  "SELECT ts AT TIME ZONE 'Europe/Helsinki' as local_time, temperature_c, wind_speed_ms, battery_soc_pct FROM moxa_weather_15min \
+   ORDER BY ts DESC LIMIT 10;"
+```
+
+Check fusion view includes moxa data:
+
+```bash
+kubectl -n weather exec statefulset/weather-postgres -- psql -U weather -d weather -c \
+  "SELECT ts, price_eur_per_mwh, fc_temperature_c, temperature_c, battery_soc_pct FROM weather_fusion \
+   ORDER BY ts DESC LIMIT 5;"
 ```
 
 ## ENTSO-E day-ahead price retrieval
