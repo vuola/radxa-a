@@ -1,0 +1,52 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: moxa-weather-15min-import
+  namespace: weather
+spec:
+  schedule: "0,15,30,45 * * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: moxa-weather-importer
+              image: docker.io/library/python:3.11-slim
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: PGHOST
+                  value: weather-postgres
+                - name: PGDATABASE
+                  valueFrom:
+                    secretKeyRef:
+                      name: weather-db
+                      key: MYSQL_DATABASE
+                - name: PGUSER
+                  valueFrom:
+                    secretKeyRef:
+                      name: weather-db
+                      key: MYSQL_USER
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: weather-db
+                      key: MYSQL_PASSWORD
+                - name: MOXA_API_URL
+                  value: "http://moxa.local"
+              command:
+                - /bin/bash
+                - -c
+              args:
+                - |
+                  set -e
+                  python -m pip install --no-cache-dir psycopg2-binary requests
+                  python /opt/moxa/moxa_weather_import.py
+              volumeMounts:
+                - name: moxa-importer-script
+                  mountPath: /opt/moxa/moxa_weather_import.py
+                  subPath: moxa_weather_import.py
+          volumes:
+            - name: moxa-importer-script
+              configMap:
+                name: moxa-weather-importer-script

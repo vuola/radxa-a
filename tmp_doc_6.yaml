@@ -1,0 +1,57 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: weather-sqlite-import
+  namespace: weather
+spec:
+  schedule: "10 0 * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: importer
+              image: docker.io/library/python:3.11-slim
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: PGHOST
+                  value: weather-postgres
+                - name: PGDATABASE
+                  valueFrom:
+                    secretKeyRef:
+                      name: weather-db
+                      key: MYSQL_DATABASE
+                - name: PGUSER
+                  valueFrom:
+                    secretKeyRef:
+                      name: weather-db
+                      key: MYSQL_USER
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: weather-db
+                      key: MYSQL_PASSWORD
+                - name: INBOX_DIR
+                  value: /var/inbox
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+                  python -m pip install --no-cache-dir psycopg2-binary
+                  python /opt/sqlite/sqlite_import.py
+              volumeMounts:
+                - name: inbox
+                  mountPath: /var/inbox
+                - name: sqlite-importer-script
+                  mountPath: /opt/sqlite/sqlite_import.py
+                  subPath: sqlite_import.py
+          volumes:
+            - name: inbox
+              hostPath:
+                path: /media/ssd250/weather/inbox
+                type: DirectoryOrCreate
+            - name: sqlite-importer-script
+              configMap:
+                name: weather-sqlite-import-script

@@ -51,6 +51,15 @@ sudo journalctl -u moxa-sma-json.service -n 200 --no-pager
 ```
 If you changed the unit file but do not want to restart the service immediately, use `systemctl daemon-reload` to make systemd aware of the change; subsequent `restart`/`reload` will use the new definition.
 
+Rebuild and deploy `moxa-readip` (SMA reader)
+```
+g++ -O2 -std=c++17 /home/vuola/moxa/readip.cpp -o /home/vuola/moxa/readip -lmodbus
+sudo systemctl stop moxa-sma-json.service
+sudo cp /home/vuola/moxa/readip /usr/local/bin/moxa-readip
+sudo systemctl start moxa-sma-json.service
+sudo journalctl -u moxa-sma-json.service -n 50 --no-pager
+```
+
 
 Create a local SQLite database (recommended) — commands
 
@@ -182,7 +191,31 @@ curl -OJ 'http://moxa.local/download_csv.php?start=2024-01-01&end=2024-12-31'
 # Check DB
 sqlite3 -header -column /var/lib/moxa/weather.db 'SELECT COUNT(*) FROM weather;'
 ```
+---
+Last edited: 2026-02-08
 
+Repo copy of server files
+-------------------------
+- The live web root `/var/www/html/` is mirrored in this repo under `./html/`.
+- When deploying, copy **contents** of `./html/` into `/var/www/html/` (no nesting):
+
+```bash
+sudo cp -a /home/vuola/moxa/html/. /var/www/html/
+```
+
+Safe deploy script (recommended)
+-------------------------------
+Use the repo script to deploy the web UI without touching `/var/www/html/data`:
+
+```bash
+/home/vuola/moxa/scripts/deploy-web.sh
+```
+
+Notes:
+- The script syncs `./html/` to `/var/www/html/` and **excludes** the `data/` directory.
+- It enforces `root:www-data` ownership and `2775` perms on `/var/www/html` and `/var/www/html/data`.
+- Existing JSON files under `/var/www/html/data` are preserved (ownership remains with the writer user).
+- It runs a quick post-deploy check (service active + sample `weather.json` read).
 ---
 Last edited: 2026-01-25
 
@@ -220,3 +253,49 @@ Quick recreate checklist
 4. Install unit files to `/etc/systemd/system/` and set `User=www-data` for the reader/inserter services.
 5. Add `www-data` to `dialout` and reload systemd.
 
+
+REST API — averaged weather row
+-------------------------------
+
+Endpoint (Apache/PHP):
+- `/api/avg.php`
+
+Query parameters:
+- `n` (required): number of newest 1‑minute rows used for averaging.
+- `cols` (required): comma‑separated column names to return.
+
+Wind averaging:
+- If `wind_speed_ms` or `wind_direction_deg` is requested, vector averaging is used:
+  - convert to (x,y), average x/y, then convert back to (WS, WD).
+
+SMA averaging:
+- If `sma_json` is requested, each key in the JSON is averaged separately and returned in the same JSON shape.
+
+Allowed columns:
+- `temperature_c`, `dew_point_c`, `relative_humidity`, `pressure_hpa`,
+  `wind_speed_ms`, `wind_direction_deg`, `precip_mmph`,
+  `energy_today_wh`, `pv_feed_in_w`, `battery_soc_pct`, `active_power_pcc_w`,
+  `bat_charge_w`, `bat_discharge_w`, `sma_json`
+
+Example:
+```
+curl -s 'http://moxa.local/api/avg.php?n=60&cols=temperature_c,pressure_hpa,wind_speed_ms,wind_direction_deg,sma_json'
+```
+
+Response (example):
+```json
+{
+  "n": 60,
+  "rows_used": 60,
+  "data": {
+    "temperature_c": 2.31,
+    "pressure_hpa": 1009.8,
+    "wind_speed_ms": 3.4,
+    "wind_direction_deg": 278.2,
+    "sma_json": {
+      "30517": 1234.0,
+      "30775": 456.0
+    }
+  }
+}
+```

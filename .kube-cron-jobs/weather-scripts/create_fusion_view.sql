@@ -6,24 +6,39 @@ SELECT
   CASE 
     WHEN EXTRACT(MINUTE FROM e.ts) = 0 THEN f1.temperature_c
     ELSE f1.temperature_c + (f2.temperature_c - f1.temperature_c) * (EXTRACT(MINUTE FROM e.ts) / 60.0)
-  END AS temperature_c,
+  END AS fc_temperature_c,
   CASE 
     WHEN EXTRACT(MINUTE FROM e.ts) = 0 THEN f1.wind_speed_ms
     ELSE f1.wind_speed_ms + (f2.wind_speed_ms - f1.wind_speed_ms) * (EXTRACT(MINUTE FROM e.ts) / 60.0)
-  END AS wind_speed_ms,
+  END AS fc_wind_speed_ms,
   CASE 
     WHEN EXTRACT(MINUTE FROM e.ts) = 0 THEN f1.wind_direction_deg
     ELSE f1.wind_direction_deg + (f2.wind_direction_deg - f1.wind_direction_deg) * (EXTRACT(MINUTE FROM e.ts) / 60.0)
-  END AS wind_direction_deg,
+  END AS fc_wind_direction_deg,
   CASE 
     WHEN EXTRACT(MINUTE FROM e.ts) = 0 THEN f1.cloud_cover_pct
     ELSE f1.cloud_cover_pct + (f2.cloud_cover_pct - f1.cloud_cover_pct) * (EXTRACT(MINUTE FROM e.ts) / 60.0)
-  END AS cloud_cover_pct,
+  END AS fc_cloud_cover_pct,
   CASE 
     WHEN EXTRACT(MINUTE FROM e.ts) = 0 THEN f1.shortwave_radiation_w_m2
     ELSE f1.shortwave_radiation_w_m2 + (f2.shortwave_radiation_w_m2 - f1.shortwave_radiation_w_m2) * (EXTRACT(MINUTE FROM e.ts) / 60.0)
-  END AS shortwave_radiation_w_m2
+  END AS fc_shortwave_radiation_w_m2,
+  m.temperature_c,
+  m.dew_point_c,
+  m.relative_humidity,
+  m.pressure_hpa,
+  m.wind_speed_ms,
+  m.wind_direction_deg,
+  m.precip_mmph,
+  m.energy_today_wh,
+  m.pv_feed_in_w,
+  m.battery_soc_pct,
+  m.active_power_pcc_w,
+  m.bat_charge_w,
+  m.bat_discharge_w,
+  m.sma_json
 FROM entsoe_prices e
 LEFT JOIN fmi_forecast f1 ON date_trunc('hour', e.ts) = f1.ts
 LEFT JOIN fmi_forecast f2 ON date_trunc('hour', e.ts) + interval '1 hour' = f2.ts
+LEFT JOIN moxa_weather_15min m ON e.ts = m.ts
 ORDER BY e.ts;

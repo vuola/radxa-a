@@ -1,0 +1,54 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: fmi-forecast-import
+  namespace: weather
+spec:
+  schedule: "5 * * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: fmi-importer
+              image: docker.io/library/python:3.11-slim
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: PGHOST
+                  value: weather-postgres
+                - name: PGDATABASE
+                  valueFrom:
+                    secretKeyRef:
+                      name: weather-db
+                      key: MYSQL_DATABASE
+                - name: PGUSER
+                  valueFrom:
+                    secretKeyRef:
+                      name: weather-db
+                      key: MYSQL_USER
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: weather-db
+                      key: MYSQL_PASSWORD
+                - name: FMI_LAT
+                  value: "60.32128967082279"
+                - name: FMI_LON
+                  value: "24.87694349774082"
+              command:
+                - /bin/bash
+                - -c
+              args:
+                - |
+                  set -e
+                  python -m pip install --no-cache-dir psycopg2-binary requests lxml
+                  python /opt/fmi/fmi_forecast_import.py
+              volumeMounts:
+                - name: fmi-importer-script
+                  mountPath: /opt/fmi/fmi_forecast_import.py
+                  subPath: fmi_forecast_import.py
+          volumes:
+            - name: fmi-importer-script
+              configMap:
+                name: fmi-importer-script

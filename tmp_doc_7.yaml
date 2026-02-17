@@ -1,0 +1,40 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: entsoe-dayahead-import
+  namespace: weather
+spec:
+                  psql -f /opt/sql/view/create_fusion_view.sql
+              volumeMounts:
+                - name: fusion-view-script
+                  mountPath: /opt/sql/view/create_fusion_view.sql
+                  subPath: create_fusion_view.sql
+                      name: entsoe-api
+            - name: fusion-view-script
+              configMap:
+                name: create-fusion-view-script
+                      key: API_KEY
+                - name: ENTSOE_IN_DOMAIN
+                  value: 10YFI-1--------U
+                - name: ENTSOE_OUT_DOMAIN
+                  value: 10YFI-1--------U
+                - name: ENTSOE_MARKET_AGREEMENT
+                  value: A01
+                - name: ENTSOE_TZ
+                  value: Europe/Helsinki
+              command:
+                - /bin/bash
+                - -c
+              args:
+                - |
+                  set -e
+                  python -m pip install --no-cache-dir psycopg2-binary requests
+                  python /opt/entsoe/entsoe_import.py
+              volumeMounts:
+                - name: entsoe-importer-script
+                  mountPath: /opt/entsoe/entsoe_import.py
+                  subPath: entsoe_import.py
+          volumes:
+            - name: entsoe-importer-script
+              configMap:
+                name: entsoe-importer-script
