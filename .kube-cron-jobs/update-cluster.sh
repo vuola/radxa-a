@@ -58,6 +58,14 @@ generate_weather_script_configs() {
       -n weather \
       --dry-run=client -o yaml > "$fusion_view_manifest"
   fi
+
+  if [ -f "$scripts_dir/export_fusion_parquet.py" ]; then
+    echo "Generating export-fusion-parquet-script ConfigMap from: $scripts_dir/export_fusion_parquet.py"
+    kubectl create configmap export-fusion-parquet-script \
+      --from-file=export_fusion_parquet.py="$scripts_dir/export_fusion_parquet.py" \
+      -n weather \
+      --dry-run=client -o yaml > "$local_manifests_dir/export-fusion-parquet-script.yaml"
+  fi
 }
 
 apply_local_manifests() {

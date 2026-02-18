@@ -69,45 +69,65 @@ data:
     0, 0);\n} else {\n  $startLocal = $nowLocal->setTime(0, 0, 0);\n}\n\n$endLocal
     = $startLocal->modify('+1 day');\n\n$startUtc = $startLocal->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d
     H:i:sP');\n$endUtc = $endLocal->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d
-    H:i:sP');\n\n$stmt = $pdo->prepare(\n  \"SELECT ts, price_eur_per_mwh, temperature_c,
-    wind_speed_ms, wind_direction_deg, cloud_cover_pct, shortwave_radiation_w_m2,
-    price_updated_at FROM weather_fusion WHERE ts >= :start AND ts < :end ORDER BY
-    ts ASC\"\n);\n$stmt->execute([':start' => $startUtc, ':end' => $endUtc]);\n$rows
-    = $stmt->fetchAll(PDO::FETCH_ASSOC);\n\nheader('Content-Type: text/html; charset=utf-8');\necho
-    \"<!doctype html>\";\necho \"<html lang=\\\"en\\\"><head><meta charset=\\\"utf-8\\\">\";\necho
-    \"<meta name=\\\"viewport\\\" content=\\\"width=device-width, initial-scale=1\\\">\";\necho
-    \"<title>Electricity & Weather Fusion (Finland)</title>\";\necho \"<style>body{font-family:system-ui,-apple-system,Segoe
-    UI,Roboto,Ubuntu,sans-serif;margin:2rem;color:#111}table{border-collapse:collapse;width:100%;max-width:1200px}th,td{padding:.5rem
-    .75rem;border-bottom:1px solid #ddd;text-align:left}th{background:#f6f6f6}caption{caption-side:top;text-align:left;font-weight:600;margin-bottom:.5rem}td.num{text-align:right}</style>\";\necho
+    H:i:sP');\n\n$stmt = $pdo->prepare(\n  \"SELECT ts, price_eur_per_mwh, fc_temperature_c,
+    moxa_temperature_c, fc_wind_speed_ms, moxa_wind_speed_ms, fc_wind_direction_deg,
+    moxa_wind_direction_deg, fc_cloud_cover_pct, fc_shortwave_radiation_w_m2, moxa_pv_feed_in_w,
+    moxa_active_power_pcc_w, moxa_battery_soc_pct FROM weather_fusion WHERE ts >=
+    :start AND ts < :end ORDER BY ts ASC\"\n);\n$stmt->execute([':start' => $startUtc,
+    ':end' => $endUtc]);\n$rows = $stmt->fetchAll(PDO::FETCH_ASSOC);\n\nheader('Content-Type:
+    text/html; charset=utf-8');\necho \"<!doctype html>\";\necho \"<html lang=\\\"en\\\"><head><meta
+    charset=\\\"utf-8\\\">\";\necho \"<meta name=\\\"viewport\\\" content=\\\"width=device-width,
+    initial-scale=1\\\">\";\necho \"<title>Electricity & Weather Fusion (Finland)</title>\";\necho
+    \"<style>body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,sans-serif;margin:2rem;color:#111}table{border-collapse:collapse;width:100%;max-width:1600px}th,td{padding:.4rem
+    .6rem;border-bottom:1px solid #ddd;text-align:center}th{background:#f6f6f6;font-size:.85rem}td{font-family:monospace;font-size:.9rem}.legend{margin:1.5rem
+    0;padding:1rem;background:#f9f9f9;border-left:3px solid #666;max-width:1600px}.legend
+    h3{margin:0 0 .5rem;font-size:1rem}.legend ol{margin:.5rem 0;padding-left:1.5rem;line-height:1.6;font-size:.9rem}</style>\";\necho
     \"</head><body>\";\necho \"<h1>Electricity & Weather Fusion (Finland)</h1>\";\n$todayLink
     = '?date=today';\n$tomorrowLink = '?date=tomorrow';\necho \"<p>Date: \" . htmlspecialchars($startLocal->format('Y-m-d'))
     . \" (Europe/Helsinki)</p>\";\necho \"<p>Toggle: <a href=\\\"{$todayLink}\\\">Today</a>
-    | <a href=\\\"{$tomorrowLink}\\\">Tomorrow</a></p>\";\n\nif (!$rows) {\n  echo
-    \"<p>No data found for this day.</p>\";\n} else {\n  echo \"<table><caption>Electricity
-    prices with interpolated weather forecast (15-min resolution)</caption>\";\n  echo
-    \"<thead><tr><th>Time</th><th>Price (cent/kWh)</th><th>Temp (°C)</th><th>Wind
-    (m/s)</th><th>Dir (°)</th><th>Cloud (%)</th><th>Rad (W/m²)</th></tr></thead><tbody>\";\n
+    | <a href=\\\"{$tomorrowLink}\\\">Tomorrow</a></p>\";\n\necho \"<div class=\\\"legend\\\"><h3>Column
+    Legend</h3><ol>\";\necho \"<li>Time (HH:MM)</li>\";\necho \"<li>Price (cent/kWh,
+    incl. margin & VAT)</li>\";\necho \"<li>Forecast Temperature (°C)</li>\";\necho
+    \"<li>Measured Temperature (°C)</li>\";\necho \"<li>Forecast Wind Speed (m/s)</li>\";\necho
+    \"<li>Measured Wind Speed (m/s)</li>\";\necho \"<li>Forecast Wind Direction (°)</li>\";\necho
+    \"<li>Measured Wind Direction (°)</li>\";\necho \"<li>Forecast Cloud Cover (%)</li>\";\necho
+    \"<li>Forecast Solar Radiation (kW/m²)</li>\";\necho \"<li>PV Feed-in Power (W)</li>\";\necho
+    \"<li>Active Power at PCC (W)</li>\";\necho \"<li>Battery SOC (%)</li>\";\necho
+    \"</ol></div>\";\n\nif (!$rows) {\n  echo \"<p>No data found for this day.</p>\";\n}
+    else {\n  echo \"<table>\";\n  echo \"<thead><tr><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th><th>10</th><th>11</th><th>12</th><th>13</th></tr></thead><tbody>\";\n
     \ foreach ($rows as $row) {\n    $tsLocal = (new DateTimeImmutable($row['ts']))->setTimezone($tz);\n
-    \   $price = $row['price_eur_per_mwh'];\n    if ($price === null) {\n      $priceText
+    \   \n    $price = $row['price_eur_per_mwh'];\n    if ($price === null) {\n      $priceText
     = '-';\n    } else {\n      $wholesaleCentPerKwh = ((float)$price) * 0.1;\n      $withMargin
     = $wholesaleCentPerKwh + 0.46;\n      $withVat = $withMargin * 1.255;\n      $priceText
-    = number_format($withVat, 1, '.', '');\n    }\n    \n    $temp = $row['temperature_c'];\n
-    \   $wind = $row['wind_speed_ms'];\n    $dir = $row['wind_direction_deg'];\n    $cloud
-    = $row['cloud_cover_pct'];\n    $rad = $row['shortwave_radiation_w_m2'];\n    \n
-    \   $tempText = $temp === null ? '-' : number_format((float)$temp, 1, '.', '');\n
-    \   $windText = $wind === null ? '-' : number_format((float)$wind, 1, '.', '');\n
-    \   $dirText = $dir === null ? '-' : number_format((float)$dir, 0, '.', '');\n
-    \   $cloudText = $cloud === null ? '-' : number_format((float)$cloud, 0, '.',
-    '');\n    $radText = $rad === null ? '-' : number_format((float)$rad, 0, '.',
-    '');\n    \n    echo \"<tr>\";\n    echo \"<td>\" . htmlspecialchars($tsLocal->format('H:i'))
-    . \"</td>\";\n    echo \"<td class=\\\"num\\\">\" . htmlspecialchars($priceText)
-    . \"</td>\";\n    echo \"<td class=\\\"num\\\">\" . htmlspecialchars($tempText)
-    . \"</td>\";\n    echo \"<td class=\\\"num\\\">\" . htmlspecialchars($windText)
-    . \"</td>\";\n    echo \"<td class=\\\"num\\\">\" . htmlspecialchars($dirText)
-    . \"</td>\";\n    echo \"<td class=\\\"num\\\">\" . htmlspecialchars($cloudText)
-    . \"</td>\";\n    echo \"<td class=\\\"num\\\">\" . htmlspecialchars($radText)
+    = number_format($withVat, 1, '.', '');\n    }\n    \n    $fcTemp = $row['fc_temperature_c'];\n
+    \   $moxaTemp = $row['moxa_temperature_c'];\n    $fcWind = $row['fc_wind_speed_ms'];\n
+    \   $moxaWind = $row['moxa_wind_speed_ms'];\n    $fcDir = $row['fc_wind_direction_deg'];\n
+    \   $moxaDir = $row['moxa_wind_direction_deg'];\n    $fcCloud = $row['fc_cloud_cover_pct'];\n
+    \   $fcRad = $row['fc_shortwave_radiation_w_m2'];\n    $pvFeed = $row['moxa_pv_feed_in_w'];\n
+    \   $activePower = $row['moxa_active_power_pcc_w'];\n    $batterySoc = $row['moxa_battery_soc_pct'];\n
+    \   \n    $fcTempText = $fcTemp === null ? '-' : number_format((float)$fcTemp,
+    1, '.', '');\n    $moxaTempText = $moxaTemp === null ? '-' : number_format((float)$moxaTemp,
+    1, '.', '');\n    $fcWindText = $fcWind === null ? '-' : number_format((float)$fcWind,
+    1, '.', '');\n    $moxaWindText = $moxaWind === null ? '-' : number_format((float)$moxaWind,
+    1, '.', '');\n    $fcDirText = $fcDir === null ? '-' : number_format((float)$fcDir,
+    0, '.', '');\n    $moxaDirText = $moxaDir === null ? '-' : number_format((float)$moxaDir,
+    0, '.', '');\n    $fcCloudText = $fcCloud === null ? '-' : number_format((float)$fcCloud,
+    0, '.', '');\n    $fcRadText = $fcRad === null ? '-' : number_format((float)$fcRad
+    / 1000, 1, '.', '');\n    $pvFeedText = $pvFeed === null ? '-' : number_format((float)$pvFeed,
+    0, '.', '');\n    $activePowerText = $activePower === null ? '-' : number_format((float)$activePower,
+    0, '.', '');\n    $batterySocText = $batterySoc === null ? '-' : number_format((float)$batterySoc,
+    0, '.', '');\n    \n    echo \"<tr>\";\n    echo \"<td>\" . htmlspecialchars($tsLocal->format('H:i'))
+    . \"</td>\";\n    echo \"<td>\" . htmlspecialchars($priceText) . \"</td>\";\n
+    \   echo \"<td>\" . htmlspecialchars($fcTempText) . \"</td>\";\n    echo \"<td>\"
+    . htmlspecialchars($moxaTempText) . \"</td>\";\n    echo \"<td>\" . htmlspecialchars($fcWindText)
+    . \"</td>\";\n    echo \"<td>\" . htmlspecialchars($moxaWindText) . \"</td>\";\n
+    \   echo \"<td>\" . htmlspecialchars($fcDirText) . \"</td>\";\n    echo \"<td>\"
+    . htmlspecialchars($moxaDirText) . \"</td>\";\n    echo \"<td>\" . htmlspecialchars($fcCloudText)
+    . \"</td>\";\n    echo \"<td>\" . htmlspecialchars($fcRadText) . \"</td>\";\n
+    \   echo \"<td>\" . htmlspecialchars($pvFeedText) . \"</td>\";\n    echo \"<td>\"
+    . htmlspecialchars($activePowerText) . \"</td>\";\n    echo \"<td>\" . htmlspecialchars($batterySocText)
     . \"</td>\";\n    echo \"</tr>\";\n  }\n  echo \"</tbody></table>\";\n}\n\necho
-    \"<p style=\\\"margin-top:1rem;color:#555\\\">POST JSON to /ingest.php or upload
+    \"<p style=\\\"margin-top:1.5rem;color:#555\\\">POST JSON to /ingest.php or upload
     a sqlite file using field name 'sqlite'.</p>\";\necho \"<p style=\\\"color:#555\\\">Export
     data: <a href=\\\"/export.php\\\">CSV (today)</a> | <a href=\\\"/export.php?date=tomorrow\\\">CSV
     (tomorrow)</a></p>\";\necho \"</body></html>\";\n?>\n"

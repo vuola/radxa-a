@@ -73,6 +73,49 @@ Deployed in namespace `weather`:
   - POST JSON to http://radxa-a.local/ingest.php
   - Upload SQLite file as multipart field `sqlite` to the same endpoint
 
+### Web UI (index.php)
+
+The web interface displays a curated selection of 13 columns from the 22-column `weather_fusion` view, showing electricity prices alongside forecasted and measured weather data.
+
+**Display columns** (numbered 1-13):
+
+1. **Time** - Timestamp in HH:MM format (Europe/Helsinki timezone)
+2. **Price** - Electricity price (cent/kWh, including margin and VAT 25.5%)
+3. **FC_Temp** - Forecast temperature (°C) from FMI
+4. **Moxa_Temp** - Measured temperature (°C) from moxa.local weather station
+5. **FC_Wind** - Forecast wind speed (m/s) from FMI
+6. **Moxa_Wind** - Measured wind speed (m/s) from moxa.local
+7. **FC_Dir** - Forecast wind direction (degrees) from FMI
+8. **Moxa_Dir** - Measured wind direction (degrees) from moxa.local
+9. **FC_Cloud** - Forecast cloud cover (%) from FMI
+10. **FC_Rad** - Forecast solar radiation (kW/m², converted from W/m²) from FMI
+11. **PV_Feed** - PV system feed-in power (W) from moxa.local
+12. **Active_Power** - Active power at point of common coupling (W) from moxa.local
+13. **Battery_SOC** - Battery state of charge (%) from moxa.local
+
+**Features**:
+
+- **Numbered headers**: Columns use numeric labels 1-13 for compact display
+- **Legend**: Expandable legend above table explains what each column number represents
+- **Date toggle**: Switch between "Today" and "Tomorrow" views via URL parameters
+- **Center alignment**: All table cells use monospace font with center alignment for readability
+- **Data formatting**: 
+  - 1 decimal place for temperatures, wind speeds, and solar radiation
+  - 0 decimals for integers (degrees, percentages, power values)
+  - Missing data shown as "-"
+- **Export links**: CSV export available at bottom of page
+
+**Source columns from weather_fusion view**:
+
+The view contains 22 columns total:
+- 3 metadata: `ts`, `price_eur_per_mwh`, `price_updated_at`
+- 5 forecast: `fc_temperature_c`, `fc_wind_speed_ms`, `fc_wind_direction_deg`, `fc_cloud_cover_pct`, `fc_shortwave_radiation_w_m2`
+- 14 measured: `moxa_temperature_c`, `moxa_dew_point_c`, `moxa_humidity_pct`, `moxa_pressure_hpa`, `moxa_wind_speed_ms`, `moxa_wind_direction_deg`, `moxa_wind_gust_ms`, `moxa_precipitation_mm_h`, `moxa_pv_feed_in_w`, `moxa_pv_generation_w`, `moxa_grid_import_w`, `moxa_active_power_pcc_w`, `moxa_battery_soc_pct`, `moxa_load_power_w`
+
+**File location**: `/home/vuola/.kube-cron-jobs/weather-web/index.php`
+
+**Deployment**: Served via `weather-web` deployment (NGINX + PHP-FPM) with ConfigMap-based file mounting. Run `/home/vuola/.kube-cron-jobs/update-cluster.sh` after editing to regenerate ConfigMap and apply changes.
+
 ## moxa.local upload workflow (Option A)
 
 **Goal**: upload a daily online SQLite backup at midnight without stopping weather services.
@@ -463,3 +506,103 @@ Example:
 - 15:00 = 130.01 €/MWh (from ENTSO-E)
 
 This matches ENTSO-E's own behavior and ensures continuous data coverage.
+
+## Weather fusion Parquet export
+
+The weather stack exports the `weather_fusion` view to timestamped Parquet files for analysis and automated control scripts.
+
+### Overview
+
+- **Data source**: PostgreSQL `weather_fusion` view (combining ENTSO-E prices, FMI forecasts, and moxa 15-minute measurements)
+- **Format**: Apache Parquet (columnar binary format)
+- **Frequency**: Every 15 minutes (synchronized with `weather_fusion` refresh)
+- **Storage**: `/media/ssd250/weather/exports/` on radxa-a.local host
+- **Retention**: Latest 30 files
+
+### CronJob configuration
+
+**Resource**: CronJob `export-fusion-parquet` in namespace `weather`
+
+**Schedule**: `*/15 * * * *` (every 15 minutes)
+
+**Behavior**:
+1. Queries entire `weather_fusion` view via `psql`
+2. Writes to timestamped file: `weather_fusion_YYYYMMDD_HHMMSS.parquet`
+3. Creates/updates `latest.parquet` symlink pointing to newest file
+4. Prunes old exports, keeping latest 30 files
+
+**Environment variables** (from secrets):
+- `PGHOST`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`: PostgreSQL connection (from secret `weather-db`)
+- `OUT_DIR`: Output directory (default: `/var/exports`, mapped to `/media/ssd250/weather/exports`)
+- `RETAIN_COUNT`: Number of files to retain (default: `30`)
+
+### File naming and symlink
+
+Files are named with UTC timestamp for unambiguous sorting:
+```
+weather_fusion_20260218_204423.parquet   # Feb 18, 2026 20:44:23 UTC
+weather_fusion_20260218_210006.parquet   # Feb 18, 2026 21:00:06 UTC
+latest.parquet -> weather_fusion_20260218_210006.parquet
+```
+
+The `latest.parquet` symlink always points to the most recent export.
+
+### Reading in Python
+
+```python
+import pandas as pd
+from pathlib import Path
+from datetime import datetime, timedelta, timezone
+
+# Read the latest export
+df = pd.read_parquet("/media/ssd250/weather/exports/latest.parquet")
+
+# Validate freshness before using for control decisions
+export_dir = Path("/media/ssd250/weather/exports")
+latest_file = export_dir / "latest.parquet"
+
+if latest_file.is_symlink():
+    target = latest_file.resolve()
+    # Extract timestamp from filename: weather_fusion_20260218_204423.parquet
+    timestamp_str = target.stem.split("_", 2)[2]  # "20260218_204423"
+    file_time = datetime.strptime(timestamp_str, "%Y%m%d_%H%M%S").replace(tzinfo=timezone.utc)
+    
+    if datetime.now(timezone.utc) - file_time > timedelta(minutes=30):
+        raise ValueError("Export data is stale, refusing to act on old data")
+
+# Safe to proceed with fresh data
+print(df.columns.tolist())
+print(df.head())
+```
+
+### Verification queries
+
+Check export directory:
+
+```bash
+ls -lh /media/ssd250/weather/exports/
+```
+
+Count retained files:
+
+```bash
+ls -1 /media/ssd250/weather/exports/weather_fusion_*.parquet | wc -l
+```
+
+View recent CronJob runs:
+
+```bash
+kubectl -n weather get jobs | grep export-fusion-parquet
+```
+
+### Use case: heat pump control
+
+The Parquet export enables automated control of the geothermal heat pump based on electricity prices and weather conditions:
+
+1. Analysis script reads `latest.parquet`
+2. Validates file timestamp is current (within 30 minutes)
+3. Applies control logic (e.g., disable heat pump when price > threshold and outdoor temp permits)
+4. Writes decision (`ALLOW` or `PROHIBIT`) with matching `ts` timestamps
+5. Publishes control commands to MQTT broker (`mqtt.weather.svc.cluster.local:1883`)
+
+The 15-minute granularity aligns with ENTSO-E price intervals, allowing precise cost optimization.

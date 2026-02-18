@@ -338,6 +338,7 @@ spec:
                 - |
                   set -e
                   psql -c "
+                  DROP VIEW IF EXISTS weather_fusion;
                   CREATE OR REPLACE VIEW weather_fusion AS
                   SELECT 
                     e.ts,
@@ -363,20 +364,20 @@ spec:
                       WHEN EXTRACT(MINUTE FROM e.ts) = 0 THEN f1.shortwave_radiation_w_m2
                       ELSE f1.shortwave_radiation_w_m2 + (f2.shortwave_radiation_w_m2 - f1.shortwave_radiation_w_m2) * (EXTRACT(MINUTE FROM e.ts) / 60.0)
                     END AS fc_shortwave_radiation_w_m2,
-                    m.temperature_c,
-                    m.dew_point_c,
-                    m.relative_humidity,
-                    m.pressure_hpa,
-                    m.wind_speed_ms,
-                    m.wind_direction_deg,
-                    m.precip_mmph,
-                    m.energy_today_wh,
-                    m.pv_feed_in_w,
-                    m.battery_soc_pct,
-                    m.active_power_pcc_w,
-                    m.bat_charge_w,
-                    m.bat_discharge_w,
-                    m.sma_json
+                    m.temperature_c AS moxa_temperature_c,
+                    m.dew_point_c AS moxa_dew_point_c,
+                    m.relative_humidity AS moxa_relative_humidity,
+                    m.pressure_hpa AS moxa_pressure_hpa,
+                    m.wind_speed_ms AS moxa_wind_speed_ms,
+                    m.wind_direction_deg AS moxa_wind_direction_deg,
+                    m.precip_mmph AS moxa_precip_mmph,
+                    m.energy_today_wh AS moxa_energy_today_wh,
+                    m.pv_feed_in_w AS moxa_pv_feed_in_w,
+                    m.battery_soc_pct AS moxa_battery_soc_pct,
+                    m.active_power_pcc_w AS moxa_active_power_pcc_w,
+                    m.bat_charge_w AS moxa_bat_charge_w,
+                    m.bat_discharge_w AS moxa_bat_discharge_w,
+                    m.sma_json AS moxa_sma_json
                   FROM entsoe_prices e
                   LEFT JOIN fmi_forecast f1 ON date_trunc('hour', e.ts) = f1.ts
                   LEFT JOIN fmi_forecast f2 ON date_trunc('hour', e.ts) + interval '1 hour' = f2.ts

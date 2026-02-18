@@ -1,17 +1,20 @@
+---
 apiVersion: batch/v1
 kind: CronJob
 metadata:
-  name: fmi-forecast-import
+  name: export-fusion-parquet
   namespace: weather
 spec:
-  schedule: "5 * * * *"
+  schedule: "*/15 * * * *"
   jobTemplate:
     spec:
       template:
         spec:
           restartPolicy: OnFailure
+          nodeSelector:
+            kubernetes.io/hostname: radxa-a
           containers:
-            - name: fmi-importer
+            - name: exporter
               image: docker.io/library/python:3.11-slim
               imagePullPolicy: IfNotPresent
               env:
@@ -32,23 +35,29 @@ spec:
                     secretKeyRef:
                       name: weather-db
                       key: MYSQL_PASSWORD
-                - name: FMI_LAT
-                  value: "60.32128967082279"
-                - name: FMI_LON
-                  value: "24.87694349774082"
+                - name: OUT_DIR
+                  value: /var/exports
+                - name: RETAIN_COUNT
+                  value: "30"
               command:
                 - /bin/bash
                 - -c
               args:
                 - |
                   set -e
-                  python -m pip install --no-cache-dir psycopg2-binary requests lxml
-                  python /opt/fmi/fmi_forecast_import.py
+                  python -m pip install --no-cache-dir psycopg2-binary pandas pyarrow
+                  python /opt/export/export_fusion_parquet.py
               volumeMounts:
-                - name: fmi-importer-script
-                  mountPath: /opt/fmi/fmi_forecast_import.py
-                  subPath: fmi_forecast_import.py
+                - name: exports
+                  mountPath: /var/exports
+                - name: exporter-script
+                  mountPath: /opt/export/export_fusion_parquet.py
+                  subPath: export_fusion_parquet.py
           volumes:
-            - name: fmi-importer-script
+            - name: exports
+              hostPath:
+                path: /media/ssd250/weather/exports
+                type: DirectoryOrCreate
+            - name: exporter-script
               configMap:
-                name: fmi-importer-script
+                name: export-fusion-parquet-script

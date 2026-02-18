@@ -1,17 +1,20 @@
+---
 apiVersion: batch/v1
 kind: CronJob
 metadata:
-  name: moxa-weather-15min-import
+  name: export-fusion-parquet
   namespace: weather
 spec:
-  schedule: "0,15,30,45 * * * *"
+  schedule: "*/15 * * * *"
   jobTemplate:
     spec:
       template:
         spec:
           restartPolicy: OnFailure
+          nodeSelector:
+            kubernetes.io/hostname: HOSTNAME
           containers:
-            - name: moxa-weather-importer
+            - name: exporter
               image: docker.io/library/python:3.11-slim
               imagePullPolicy: IfNotPresent
               env:
@@ -32,21 +35,29 @@ spec:
                     secretKeyRef:
                       name: weather-db
                       key: MYSQL_PASSWORD
-                - name: MOXA_API_URL
-                  value: "http://moxa.local"
+                - name: OUT_DIR
+                  value: /var/exports
+                - name: RETAIN_COUNT
+                  value: "30"
               command:
                 - /bin/bash
                 - -c
               args:
                 - |
                   set -e
-                  python -m pip install --no-cache-dir psycopg2-binary requests
-                  python /opt/moxa/moxa_weather_import.py
+                  python -m pip install --no-cache-dir psycopg2-binary pandas pyarrow
+                  python /opt/export/export_fusion_parquet.py
               volumeMounts:
-                - name: moxa-importer-script
-                  mountPath: /opt/moxa/moxa_weather_import.py
-                  subPath: moxa_weather_import.py
+                - name: exports
+                  mountPath: /var/exports
+                - name: exporter-script
+                  mountPath: /opt/export/export_fusion_parquet.py
+                  subPath: export_fusion_parquet.py
           volumes:
-            - name: moxa-importer-script
+            - name: exports
+              hostPath:
+                path: /media/ssd250/weather/exports
+                type: DirectoryOrCreate
+            - name: exporter-script
               configMap:
-                name: moxa-weather-importer-script
+                name: export-fusion-parquet-script
