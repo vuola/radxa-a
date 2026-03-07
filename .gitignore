@@ -3,6 +3,7 @@
 
 # Caches and local state
 .cache/
+.local/
 .local/share/Trash/
 
 # Secrets and credentials

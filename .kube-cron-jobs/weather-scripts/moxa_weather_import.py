@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 print("Starting Moxa weather 15-minute import", file=sys.stderr, flush=True)
 
 moxa_api_url = os.environ.get("MOXA_API_URL", "http://moxa.local")
-n_minutes = 900  # 15 minutes in seconds
+n_minutes = 15  # Number of 1-minute samples for a 15-minute average
 
 # All weather columns to retrieve from moxa.local
 weather_cols = [

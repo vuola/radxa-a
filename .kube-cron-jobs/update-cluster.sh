@@ -8,6 +8,7 @@ web_config_manifest="$local_manifests_dir/weather-web-config.yaml"
 scripts_dir="$kube_cron_jobs_dir/weather-scripts"
 entsoe_manifest="$local_manifests_dir/entsoe-importer-script.yaml"
 fmi_manifest="$local_manifests_dir/fmi-importer-script.yaml"
+moxa_manifest="$local_manifests_dir/moxa-weather-importer-script.yaml"
 sqlite_manifest="$local_manifests_dir/weather-sqlite-import-script.yaml"
 fusion_view_manifest="$local_manifests_dir/create-fusion-view-script.yaml"
 new_host="$(hostname)"
@@ -41,6 +42,14 @@ generate_weather_script_configs() {
       --from-file=fmi_forecast_import.py="$scripts_dir/fmi_forecast_import.py" \
       -n weather \
       --dry-run=client -o yaml > "$fmi_manifest"
+  fi
+
+  if [ -f "$scripts_dir/moxa_weather_import.py" ]; then
+    echo "Generating moxa-weather-importer-script ConfigMap from: $scripts_dir/moxa_weather_import.py"
+    kubectl create configmap moxa-weather-importer-script \
+      --from-file=moxa_weather_import.py="$scripts_dir/moxa_weather_import.py" \
+      -n weather \
+      --dry-run=client -o yaml > "$moxa_manifest"
   fi
 
   if [ -f "$scripts_dir/sqlite_import.py" ]; then

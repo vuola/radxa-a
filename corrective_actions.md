@@ -60,7 +60,9 @@
 
 ## Item #4: SQLite Backup Files
 
-**Status**: ❌ FAIL - Backup ingest chain stale
+**Status**: ✅ FIXED at moxa.local
+
+**Update (2026-03-07)**: `moxa-archive-upload` on moxa.local was corrected and backup upload resumed.
 
 **Issue**: No fresh SQLite backup files visible in `/media/ssd250/weather/inbox/` (only `processed/` directory), and PostgreSQL `weather.max(ts)` is stale at `2026-02-09 21:59:33+00` even though sqlite import jobs complete.
 
@@ -69,10 +71,10 @@
 - Source-level reconciliation and history completeness are compromised
 
 **Corrective Actions (brief)**:
-1. Verify `moxa-archive-upload` timer/service on moxa.local is running and successful daily
-2. Verify uploads reach radxa-a ingest path
-3. Verify sqlite import consumes new files and advances `weather.max(ts)`
-4. Add alert if no new SQLite backup is imported within 24h
+1. ✅ Verify `moxa-archive-upload` timer/service on moxa.local is running and successful daily
+2. ✅ Verify uploads reach radxa-a ingest path
+3. ✅ Verify sqlite import consumes new files and advances `weather.max(ts)`
+4. ⏳ Add alert if no new SQLite backup is imported within 24h
 
 ---
 
@@ -84,6 +86,11 @@
 
 **Issue**: Intermittent zero-byte dump artifact detected (`weather_2026-03-03_001501.sql`).
 
+**Additional finding during Item #5 work (radxa-a.local)**:
+- Bug in moxa importer parameter semantics: `/home/vuola/.kube-cron-jobs/weather-scripts/moxa_weather_import.py` used `n_minutes = 900` even though moxa.local API `n` expects sample count (1-minute rows), not seconds.
+- This caused 900-sample (~15-hour) averaging instead of 15-sample (15-minute) averaging, producing stale moxa temperatures.
+- ✅ Local fix applied: `n_minutes = 15`.
+
 **Impact**:
 - Silent backup failure risk despite file presence
 
@@ -91,19 +98,6 @@
 1. Add post-backup validation to fail on zero-byte/too-small dumps
 2. Add alerting for missing/invalid daily dump
 3. Ensure retention logic does not treat failed empty dumps as valid backups
-
----
-
-## Audit Progress
-
-- [x] Item #1: ENTSO-E prices table
-- [x] Item #2: FMI forecast table
-- [x] Item #3: Moxa weather 15-min table (flagged for follow-up at moxa.local)
-- [x] Item #4: SQLite backup files
-- [x] Item #5: PostgreSQL backup dumps
-- [x] Item #6: Weather fusion view
-- [x] Item #7: Parquet export files
-
 
 ---
 
@@ -153,6 +147,17 @@
 2. Once Items #2, #3, #4 are fixed, parquet quality will automatically improve
 3. Monitor export file sizes remain in 165-170 KB range (indicates consistent data volume)
 
+---
+
+## Audit Progress
+
+- [x] Item #1: ENTSO-E prices table
+- [x] Item #2: FMI forecast table
+- [x] Item #3: Moxa weather 15-min table (flagged for follow-up at moxa.local)
+- [x] Item #4: SQLite backup files
+- [x] Item #5: PostgreSQL backup dumps
+- [x] Item #6: Weather fusion view
+- [x] Item #7: Parquet export files
 
 ---
 

@@ -120,6 +120,18 @@ The view contains 22 columns total:
 
 **Goal**: upload a daily online SQLite backup at midnight without stopping weather services.
 
+### Background: moxa.local weather services
+
+Before setting up the upload, understand the existing services on moxa.local:
+
+**Core weather collection services** (running as `www-data`):
+- `weather.service` — reads serial weather station, writes `/var/www/html/data/weather.json`
+- `moxa-sma-json.service` — reads SMA inverter via Modbus, writes `/var/www/html/data/sma.json`
+- `moxa-insert.service` + `moxa-insert.timer` — merges JSON files into SQLite `/var/lib/moxa/weather.db`
+
+**REST API**:
+- `/api/avg.php` — provides averaged weather data for radxa-a.local's 15-minute import
+
 ### Script
 
 Path on moxa.local:
@@ -128,7 +140,7 @@ Path on moxa.local:
 
 Behavior:
 
-1. Creates an online SQLite backup of /var/lib/moxa/weather.db
+1. Creates an online SQLite backup of `/var/lib/moxa/weather.db`
 2. Uploads the backup to http://radxa-a.local/ingest.php
 3. On success, deletes rows older than 24 hours and truncates WAL
 
@@ -146,22 +158,19 @@ Timer schedule:
 Uploaded SQLite files are imported into PostgreSQL by a nightly CronJob at 00:10.
 Duplicates are prevented using a unique constraint on `ts` (timestamp) and `ON CONFLICT DO NOTHING`.
 
-### Best-practice (least privilege)
+### User and permissions
 
-To avoid interactive sudo and minimize root usage, run the backup uploader as a dedicated, unprivileged service user.
+The moxa.local system runs weather services as `www-data` user (member of `dialout` group for serial access). The SQLite database is owned by `vuola:www-data` with mode `0660`, allowing both the owner and group members to read/write.
 
 Recommended setup on moxa.local (run once as root):
 
-```
-# create a service user with no shell login
-sudo useradd --system --home /var/lib/moxa --shell /usr/sbin/nologin moxa-backup
+```bash
+# ensure www-data is in dialout group (for serial device access)
+sudo usermod -aG dialout www-data
 
-# allow moxa-backup to read/write the DB and archive dir via www-data group
-sudo usermod -aG www-data moxa-backup
-
-# ensure group ownership and setgid on the DB directory
+# create DB directory with setgid for group inheritance
 sudo mkdir -p /var/lib/moxa /var/lib/moxa/archive
-sudo chown -R vuola:www-data /var/lib/moxa
+sudo chown vuola:www-data /var/lib/moxa
 sudo chmod 2775 /var/lib/moxa /var/lib/moxa/archive
 
 # restrict DB file access to owner+group
@@ -169,7 +178,7 @@ sudo chown vuola:www-data /var/lib/moxa/weather.db
 sudo chmod 0660 /var/lib/moxa/weather.db
 ```
 
-With this in place, the service runs as `moxa-backup` (see service file below) and no interactive sudo is needed for nightly runs.
+The upload service should run as `www-data` user (matching existing services) or as a dedicated `moxa-backup` user added to `www-data` group. Either approach works; `www-data` is simpler since it's already configured.
 
 ### Install commands (run on radxa-a.local)
 
@@ -183,7 +192,7 @@ scp /home/vuola/moxa-upload/moxa-archive-upload.timer vuola@moxa.local:/tmp/
 
 Install on moxa.local:
 
-```
+```bash
 ssh vuola@moxa.local <<'EOF'
 sudo mv /tmp/moxa-upload-archive.sh /usr/local/bin/moxa-upload-archive.sh
 sudo chmod 755 /usr/local/bin/moxa-upload-archive.sh
@@ -196,6 +205,8 @@ sudo systemctl enable --now moxa-archive-upload.timer
 sudo systemctl status moxa-archive-upload.timer --no-pager
 EOF
 ```
+
+**Note**: The service file should specify `User=www-data` to match existing moxa.local services. Alternatively, create a dedicated `moxa-backup` user and add it to the `www-data` group.
 
 Optional immediate run:
 
@@ -217,7 +228,7 @@ sudo journalctl -u moxa-archive-upload.service -n 200 --no-pager
 
 Run these checks as the normal user (no sudo required):
 
-```
+```bash
 # confirm the timer is active
 systemctl status moxa-archive-upload.timer --no-pager
 
@@ -229,11 +240,14 @@ ls -l /var/lib/moxa/archive
 
 # confirm the DB still has rows after pruning
 sqlite3 -header -column /var/lib/moxa/weather.db "SELECT COUNT(*) AS rows FROM weather;"
+
+# check that existing services are running
+sudo systemctl status weather.service moxa-sma-json.service moxa-insert.timer --no-pager
 ```
 
 Success verification (radxa-a.local):
 
-```
+```bash
 # a new SQLite upload should appear here after a successful run
 ls -l /media/ssd250/weather/inbox
 
@@ -243,7 +257,7 @@ curl -i http://radxa-a.local/ingest.php
 
 If the service fails, view logs without sudo (requires systemd journal permissions for your user):
 
-```
+```bash
 journalctl -u moxa-archive-upload.service -n 200 --no-pager
 ```
 
@@ -275,11 +289,47 @@ curl -sSf http://192.168.68.111/ -H "Host: radxa-a.local"
 
 On moxa.local:
 
-```
+```bash
 ls -l /var/lib/moxa/weather.db
 sqlite3 -header -column /var/lib/moxa/weather.db "SELECT COUNT(*) FROM weather;"
-sudo systemctl status moxa-archive-upload.timer --no-pager
+sudo systemctl status moxa-archive-upload.timer weather.service moxa-insert.timer --no-pager
 ```
+
+## moxa.local REST API
+
+The moxa.local server exposes a REST API for retrieving averaged weather data:
+
+### Averaged weather endpoint
+
+**Endpoint**: `/api/avg.php`
+
+**Query parameters**:
+- `n` (required): number of newest 1-minute rows to average
+- `cols` (required): comma-separated column names to return
+
+**Wind averaging**: Vector averaging is used for `wind_speed_ms` and `wind_direction_deg`
+
+**SMA averaging**: When `sma_json` is requested, each JSON key is averaged separately
+
+**Example request** (15-minute average used by radxa-a.local):
+```bash
+curl -s 'http://moxa.local/api/avg.php?n=900&cols=temperature_c,pressure_hpa,wind_speed_ms,wind_direction_deg,pv_feed_in_w,battery_soc_pct,active_power_pcc_w,sma_json'
+```
+
+This endpoint is called every 15 minutes by the `moxa-weather-15min-import` CronJob on radxa-a.local.
+
+## moxa.local system reference
+
+For detailed information about the weather station server configuration, see [MOXA.md](MOXA.md), which contains:
+
+- Core service descriptions (weather.service, moxa-sma-json.service, moxa-insert.service)
+- Binary locations and rebuild instructions
+- SQLite database schema and table structure
+- Directory ownership and permission model
+- Deployment procedures and critical file locations
+- Web UI structure and CSV export endpoint
+
+The MOXA.md file is a copy from the actual weather station server and should be considered the authoritative reference for moxa.local configuration details.
 
 ## MQTT service (heating control)
 
