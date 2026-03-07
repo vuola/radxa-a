@@ -21,6 +21,7 @@ generate_weather_web_config() {
       --from-file=index.php="$web_files_dir/index.php" \
       --from-file=export.php="$web_files_dir/export.php" \
       --from-file=ingest.php="$web_files_dir/ingest.php" \
+      --from-file=health.php="$web_files_dir/api/health.php" \
       --from-file=php-ext.ini="$web_files_dir/php-ext.ini" \
       -n weather \
       --dry-run=client -o yaml > "$web_config_manifest"

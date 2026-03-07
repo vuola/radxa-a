@@ -164,7 +164,23 @@ spec:
                 - |
                   set -e
                   ts=$(date +%F_%H%M%S)
-                  pg_dump -h weather-postgres -U "$POSTGRES_USER" "$POSTGRES_DB" > /backups/weather_${ts}.sql
+                  dump_file="/backups/weather_${ts}.sql"
+                  
+                  # Create dump
+                  pg_dump -h weather-postgres -U "$POSTGRES_USER" "$POSTGRES_DB" > "$dump_file"
+                  
+                  # Validate dump: must be at least 100KB (102400 bytes)
+                  dump_size=$(stat -c %s "$dump_file" 2>/dev/null || echo 0)
+                  if [ "$dump_size" -lt 102400 ]; then
+                    echo "ERROR: Dump file is too small (${dump_size} bytes). Minimum expected: 100KB" >&2
+                    rm -f "$dump_file"
+                    exit 1
+                  fi
+                  
+                  echo "Backup successful: ${dump_file} (${dump_size} bytes)"
+                  
+                  # Retention: keep latest 7 valid dumps, remove zero-byte/failed dumps immediately
+                  find /backups -name 'weather_*.sql' -type f -size 0 -delete
                   ls -1t /backups/weather_*.sql | tail -n +8 | xargs -r rm -f
               volumeMounts:
                 - name: backups
@@ -485,6 +501,8 @@ spec:
               subPath: nginx.conf
             - name: web-app
               mountPath: /app
+            - name: api
+              mountPath: /app/api
         - name: phpfpm
           image: docker.io/bitnami/php-fpm:8.2.7-debian-11-r4
           imagePullPolicy: IfNotPresent
@@ -516,8 +534,16 @@ spec:
           volumeMounts:
             - name: web-app
               mountPath: /app
+            - name: api
+              mountPath: /app/api
             - name: inbox
               mountPath: /var/inbox
+            - name: backups
+              mountPath: /media/ssd250/weather/backups
+              readOnly: true
+            - name: exports
+              mountPath: /media/ssd250/weather/exports
+              readOnly: true
             - name: db-secret
               mountPath: /var/secret
             - name: php-config
@@ -540,6 +566,12 @@ spec:
                 path: export.php
               - key: ingest.php
                 path: ingest.php
+        - name: api
+          configMap:
+            name: weather-web-config
+            items:
+              - key: health.php
+                path: health.php
         - name: php-config
           configMap:
             name: weather-web-config
@@ -549,6 +581,14 @@ spec:
         - name: inbox
           hostPath:
             path: /media/ssd250/weather/inbox
+            type: DirectoryOrCreate
+        - name: backups
+          hostPath:
+            path: /media/ssd250/weather/backups
+            type: DirectoryOrCreate
+        - name: exports
+          hostPath:
+            path: /media/ssd250/weather/exports
             type: DirectoryOrCreate
         - name: db-secret
           secret:

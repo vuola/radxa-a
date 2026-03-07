@@ -39,6 +39,72 @@ data:
     0, '.', '') : '';\n    \n    fputcsv($out, [\n      $row['ts'],\n      $tsLocal->format('Y-m-d
     H:i:s'),\n      $price,\n      $priceConverted,\n      $temp,\n      $wind,\n
     \     $dir,\n      $cloud,\n      $rad\n    ]);\n}\nfclose($out);\n?>\n"
+  health.php: "<?php\nheader('Content-Type: application/json');\n\n$readSecret = function(string
+    $path, string $fallback = ''): string {\n  if (is_readable($path)) {\n    return
+    trim((string)file_get_contents($path));\n  }\n  return $fallback;\n};\n\n$host
+    = getenv('DB_HOST') ?: 'weather-postgres';\n$db = getenv('DB_NAME') ?: $readSecret('/var/secret/MYSQL_DATABASE',
+    'weather');\n$user = getenv('DB_USER') ?: $readSecret('/var/secret/MYSQL_USER',
+    'weather');\n$pass = getenv('DB_PASS') ?: $readSecret('/var/secret/MYSQL_PASSWORD',
+    '');\n\n$dsn = \"pgsql:host={$host};dbname={$db}\";\n\n$result = [\n  'overall_status'
+    => 'ok',\n  'checked_at' => gmdate('Y-m-d\\TH:i:s\\Z'),\n  'failures' => []\n];\n\n//
+    1. Database connectivity\ntry {\n  $pdo = new PDO($dsn, $user, $pass, [PDO::ATTR_ERRMODE
+    => PDO::ERRMODE_EXCEPTION, PDO::ATTR_TIMEOUT => 3]);\n  $pdo->query('SELECT 1')->fetch();\n}
+    catch (Throwable $e) {\n  $result['overall_status'] = 'error';\n  $result['failures'][]
+    = [\n    'check' => 'database',\n    'status' => 'error',\n    'message' => 'Database
+    connection failed'\n  ];\n  echo json_encode($result, JSON_PRETTY_PRINT);\n  exit;\n}\n\n//
+    2. Moxa 15min freshness\ntry {\n  $stmt = $pdo->query(\"SELECT EXTRACT(EPOCH FROM
+    (now() - MAX(ts)))/60 AS age_min FROM moxa_weather_15min\");\n  $row = $stmt->fetch(PDO::FETCH_ASSOC);\n
+    \ $age_min = $row ? (float)$row['age_min'] : 999999;\n  \n  if ($age_min > 60)
+    {\n    $result['overall_status'] = 'error';\n    $result['failures'][] = [\n      'check'
+    => 'moxa_15min',\n      'status' => 'error',\n      'message' => sprintf('Moxa
+    data stale (%.0f min old, expected ≤60)', $age_min)\n    ];\n  } elseif ($age_min
+    > 20) {\n    if ($result['overall_status'] === 'ok') $result['overall_status']
+    = 'warn';\n    $result['failures'][] = [\n      'check' => 'moxa_15min',\n      'status'
+    => 'warn',\n      'message' => sprintf('Moxa data aging (%.0f min old, expected
+    ≤20)', $age_min)\n    ];\n  }\n} catch (Throwable $e) {\n  $result['overall_status']
+    = 'error';\n  $result['failures'][] = [\n    'check' => 'moxa_15min',\n    'status'
+    => 'error',\n    'message' => 'Failed to check moxa_weather_15min'\n  ];\n}\n\n//
+    3. FMI forecast freshness (should cover now + 6h)\ntry {\n  $stmt = $pdo->query(\"SELECT
+    COUNT(*) AS future_count FROM fmi_forecast WHERE ts > now() + interval '6 hours'\");\n
+    \ $row = $stmt->fetch(PDO::FETCH_ASSOC);\n  $future_count = $row ? (int)$row['future_count']
+    : 0;\n  \n  if ($future_count < 1) {\n    if ($result['overall_status'] === 'ok')
+    $result['overall_status'] = 'warn';\n    $result['failures'][] = [\n      'check'
+    => 'fmi_forecast',\n      'status' => 'warn',\n      'message' => 'FMI forecast
+    does not cover +6h horizon'\n    ];\n  }\n} catch (Throwable $e) {\n  $result['overall_status']
+    = 'error';\n  $result['failures'][] = [\n    'check' => 'fmi_forecast',\n    'status'
+    => 'error',\n    'message' => 'Failed to check fmi_forecast'\n  ];\n}\n\n// 4.
+    ENTSOE prices freshness (should cover current day)\ntry {\n  $stmt = $pdo->query(\"SELECT
+    COUNT(*) AS today_count FROM entsoe_prices WHERE ts >= date_trunc('day', now())
+    AND ts < date_trunc('day', now()) + interval '1 day'\");\n  $row = $stmt->fetch(PDO::FETCH_ASSOC);\n
+    \ $today_count = $row ? (int)$row['today_count'] : 0;\n  \n  if ($today_count
+    < 24) {\n    if ($result['overall_status'] === 'ok') $result['overall_status']
+    = 'warn';\n    $result['failures'][] = [\n      'check' => 'entsoe_prices',\n
+    \     'status' => 'warn',\n      'message' => sprintf('ENTSOE prices incomplete
+    today (%d/96 rows)', $today_count)\n    ];\n  }\n} catch (Throwable $e) {\n  $result['overall_status']
+    = 'error';\n  $result['failures'][] = [\n    'check' => 'entsoe_prices',\n    'status'
+    => 'error',\n    'message' => 'Failed to check entsoe_prices'\n  ];\n}\n\n// 5.
+    Backup validity\n$backup_dir = '/media/ssd250/weather/backups';\n$backup_files
+    = glob($backup_dir . '/weather_*.sql');\nif ($backup_files) {\n  usort($backup_files,
+    function($a, $b) { return filemtime($b) - filemtime($a); });\n  $latest = $backup_files[0];\n
+    \ $age_hours = (time() - filemtime($latest)) / 3600;\n  $size_kb = filesize($latest)
+    / 1024;\n  \n  if ($age_hours > 26 || $size_kb < 100) {\n    $result['overall_status']
+    = 'error';\n    $msg = [];\n    if ($age_hours > 26) $msg[] = sprintf('%.1fh old',
+    $age_hours);\n    if ($size_kb < 100) $msg[] = sprintf('only %.0fKB', $size_kb);\n
+    \   $result['failures'][] = [\n      'check' => 'backup',\n      'status' => 'error',\n
+    \     'message' => 'Backup invalid: ' . implode(', ', $msg)\n    ];\n  }\n} else
+    {\n  $result['overall_status'] = 'error';\n  $result['failures'][] = [\n    'check'
+    => 'backup',\n    'status' => 'error',\n    'message' => 'No backup files found'\n
+    \ ];\n}\n\n// 6. Parquet freshness\n$parquet_dir = '/media/ssd250/weather/exports';\n$parquet_files
+    = glob($parquet_dir . '/weather_fusion_*.parquet');\nif ($parquet_files) {\n  usort($parquet_files,
+    function($a, $b) { return filemtime($b) - filemtime($a); });\n  $latest = $parquet_files[0];\n
+    \ $age_min = (time() - filemtime($latest)) / 60;\n  \n  if ($age_min > 30) {\n
+    \   if ($result['overall_status'] === 'ok') $result['overall_status'] = 'warn';\n
+    \   $result['failures'][] = [\n      'check' => 'parquet',\n      'status' =>
+    'warn',\n      'message' => sprintf('Parquet export stale (%.0f min old, expected
+    ≤30)', $age_min)\n    ];\n  }\n} else {\n  if ($result['overall_status'] === 'ok')
+    $result['overall_status'] = 'warn';\n  $result['failures'][] = [\n    'check'
+    => 'parquet',\n    'status' => 'warn',\n    'message' => 'No parquet files found'\n
+    \ ];\n}\n\necho json_encode($result, JSON_PRETTY_PRINT);\n?>\n"
   index.php: "<?php\n$readSecret = function(string $path, string $fallback = ''):
     string {\n  if (is_readable($path)) {\n    return trim((string)file_get_contents($path));\n
     \ }\n  return $fallback;\n};\n\n$host = getenv('DB_HOST') ?: 'weather-postgres';\n$db
@@ -81,9 +147,21 @@ data:
     \"<style>body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,sans-serif;margin:2rem;color:#111}table{border-collapse:collapse;width:100%;max-width:1600px}th,td{padding:.4rem
     .6rem;border-bottom:1px solid #ddd;text-align:center}th{background:#f6f6f6;font-size:.85rem}td{font-family:monospace;font-size:.9rem}.legend{margin:1.5rem
     0;padding:1rem;background:#f9f9f9;border-left:3px solid #666;max-width:1600px}.legend
-    h3{margin:0 0 .5rem;font-size:1rem}.legend ol{margin:.5rem 0;padding-left:1.5rem;line-height:1.6;font-size:.9rem}</style>\";\necho
-    \"</head><body>\";\necho \"<h1>Electricity & Weather Fusion (Finland)</h1>\";\n$todayLink
-    = '?date=today';\n$tomorrowLink = '?date=tomorrow';\necho \"<p>Date: \" . htmlspecialchars($startLocal->format('Y-m-d'))
+    h3{margin:0 0 .5rem;font-size:1rem}.legend ol{margin:.5rem 0;padding-left:1.5rem;line-height:1.6;font-size:.9rem}.health{margin:1rem
+    0;padding:.6rem 1rem;border-radius:4px;font-size:.9rem;max-width:1600px}.health.ok{background:#d4edda;border:1px
+    solid #c3e6cb;color:#155724}.health.warn{background:#fff3cd;border:1px solid #ffeaa7;color:#856404}.health.error{background:#f8d7da;border:1px
+    solid #f5c6cb;color:#721c24}.health-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}.health-dot.ok{background:#28a745}.health-dot.warn{background:#ffc107}.health-dot.error{background:#dc3545}.health-failures{margin-top:.5rem;padding-left:1.2rem;font-size:.85rem;line-height:1.5}</style>\";\necho
+    \"</head><body>\";\necho \"<div id=\\\"health-status\\\" class=\\\"health ok\\\"><span
+    class=\\\"health-dot ok\\\"></span><strong>System OK</strong> <span style=\\\"color:#666;font-size:.8rem\\\">(checking...)</span></div>\";\necho
+    \"<script>function updateHealth(){fetch('/api/health.php').then(r=>r.json()).then(d=>{const
+    h=document.getElementById('health-status');const s=d.overall_status;h.className='health
+    '+s;let dot='<span class=\\\"health-dot '+s+'\\\"></span>';let txt=s==='ok'?'System
+    OK':s==='warn'?'System WARNING':'System ERROR';let time=' <span style=\\\"color:#666;font-size:.8rem\\\">('+new
+    Date(d.checked_at).toLocaleTimeString()+')</span>';let fails='';if(d.failures.length>0){fails='<div
+    class=\\\"health-failures\\\">';d.failures.forEach(f=>{fails+='<div>• '+f.message+'</div>';});fails+='</div>';}h.innerHTML=dot+'<strong>'+txt+'</strong>'+time+fails;}).catch(e=>{console.error('Health
+    check failed:',e);});}updateHealth();setInterval(updateHealth,60000);</script>\";\necho
+    \"<h1>Electricity & Weather Fusion (Finland)</h1>\";\n$todayLink = '?date=today';\n$tomorrowLink
+    = '?date=tomorrow';\necho \"<p>Date: \" . htmlspecialchars($startLocal->format('Y-m-d'))
     . \" (Europe/Helsinki)</p>\";\necho \"<p>Toggle: <a href=\\\"{$todayLink}\\\">Today</a>
     | <a href=\\\"{$tomorrowLink}\\\">Tomorrow</a></p>\";\n\necho \"<div class=\\\"legend\\\"><h3>Column
     Legend</h3><ol>\";\necho \"<li>Time (HH:MM)</li>\";\necho \"<li>Price (cent/kWh,
@@ -91,7 +169,7 @@ data:
     \"<li>Measured Temperature (°C)</li>\";\necho \"<li>Forecast Wind Speed (m/s)</li>\";\necho
     \"<li>Measured Wind Speed (m/s)</li>\";\necho \"<li>Forecast Wind Direction (°)</li>\";\necho
     \"<li>Measured Wind Direction (°)</li>\";\necho \"<li>Forecast Cloud Cover (%)</li>\";\necho
-    \"<li>Forecast Solar Radiation (kW/m²)</li>\";\necho \"<li>PV Feed-in Power (W)</li>\";\necho
+    \"<li>Forecast Solar Radiation (W/m²)</li>\";\necho \"<li>PV Feed-in Power (W)</li>\";\necho
     \"<li>Active Power at PCC (W)</li>\";\necho \"<li>Battery SOC (%)</li>\";\necho
     \"</ol></div>\";\n\nif (!$rows) {\n  echo \"<p>No data found for this day.</p>\";\n}
     else {\n  echo \"<table>\";\n  echo \"<thead><tr><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th><th>10</th><th>11</th><th>12</th><th>13</th></tr></thead><tbody>\";\n
@@ -112,8 +190,8 @@ data:
     1, '.', '');\n    $fcDirText = $fcDir === null ? '-' : number_format((float)$fcDir,
     0, '.', '');\n    $moxaDirText = $moxaDir === null ? '-' : number_format((float)$moxaDir,
     0, '.', '');\n    $fcCloudText = $fcCloud === null ? '-' : number_format((float)$fcCloud,
-    0, '.', '');\n    $fcRadText = $fcRad === null ? '-' : number_format((float)$fcRad
-    / 1000, 1, '.', '');\n    $pvFeedText = $pvFeed === null ? '-' : number_format((float)$pvFeed,
+    0, '.', '');\n    $fcRadText = $fcRad === null ? '-' : number_format((float)$fcRad,
+    1, '.', '');\n    $pvFeedText = $pvFeed === null ? '-' : number_format((float)$pvFeed,
     0, '.', '');\n    $activePowerText = $activePower === null ? '-' : number_format((float)$activePower,
     0, '.', '');\n    $batterySocText = $batterySoc === null ? '-' : number_format((float)$batterySoc,
     0, '.', '');\n    \n    echo \"<tr>\";\n    echo \"<td>\" . htmlspecialchars($tsLocal->format('H:i'))

@@ -1,136 +1,58 @@
 apiVersion: v1
 data:
-  fmi_forecast_import.py: |
-    import os
-    import sys
-    import requests
-    import psycopg2
-    from psycopg2.extras import execute_batch
-    from lxml import etree
-    from datetime import datetime, timedelta, timezone
-    from zoneinfo import ZoneInfo
-
-    print("Starting FMI forecast import", file=sys.stderr, flush=True)
-
-    lat = os.environ.get("FMI_LAT", "60.32128967082279")
-    lon = os.environ.get("FMI_LON", "24.87694349774082")
-
-    wfs_url = "https://opendata.fmi.fi/wfs"
-    params = {
-        "service": "WFS",
-        "version": "2.0.0",
-        "request": "getFeature",
-        "storedquery_id": "fmi::forecast::harmonie::surface::point::simple",
-        "latlon": f"{lat},{lon}",
-    }
-
-    try:
-        resp = requests.get(wfs_url, params=params, timeout=120)
-        resp.raise_for_status()
-    except Exception as e:
-        print(f"Error fetching FMI data: {e}", file=sys.stderr, flush=True)
-        sys.exit(1)
-
-    root = etree.fromstring(resp.content)
-    ns = {
-        "wfs": "http://www.opengis.net/wfs/2.0",
-        "BsWfs": "http://xml.fmi.fi/schema/wfs/2.0",
-        "gml": "http://www.opengis.net/gml/3.2",
-    }
-
-    tz_utc = timezone.utc
-
-    try:
-        pg_conn = psycopg2.connect(
-            host=os.environ["PGHOST"],
-            dbname=os.environ["PGDATABASE"],
-            user=os.environ["PGUSER"],
-            password=os.environ["PGPASSWORD"],
-        )
-        pg_conn.autocommit = True
-        cur = pg_conn.cursor()
-    except Exception as e:
-        print(f"DB connection failed: {e}", file=sys.stderr, flush=True)
-        sys.exit(1)
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS fmi_forecast (
-          ts TIMESTAMPTZ PRIMARY KEY,
-          temperature_c DOUBLE PRECISION NULL,
-          wind_speed_ms DOUBLE PRECISION NULL,
-          wind_direction_deg DOUBLE PRECISION NULL,
-          cloud_cover_pct DOUBLE PRECISION NULL,
-          shortwave_radiation_w_m2 DOUBLE PRECISION NULL,
-          created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-          updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-        );
-        """
-    )
-
-    data_by_param_ts = {}
-    for member in root.findall(".//wfs:member", ns):
-        bs_point_tv = member.find(".//BsWfs:BsWfsElement", ns)
-        if bs_point_tv is None:
-            continue
-
-        time_elem = bs_point_tv.find(".//BsWfs:Time", ns)
-        param_elem = bs_point_tv.find(".//BsWfs:ParameterName", ns)
-        value_elem = bs_point_tv.find(".//BsWfs:ParameterValue", ns)
-
-        if time_elem is None or param_elem is None or value_elem is None:
-            continue
-
-        time_text = time_elem.text
-        param_name = param_elem.text
-        value_text = value_elem.text
-
-        if not time_text or not param_name or not value_text:
-            continue
-
-        try:
-            dt = datetime.fromisoformat(time_text.replace("Z", "+00:00"))
-            value = float(value_text)
-        except:
-            continue
-
-        ts_key = dt.isoformat()
-        if ts_key not in data_by_param_ts:
-            data_by_param_ts[ts_key] = {"ts": dt}
-
-        data_by_param_ts[ts_key][param_name] = value
-
-    rows = []
-    for ts_key, data in data_by_param_ts.items():
-        dt = data["ts"]
-        temp = data.get("Temperature")
-        wind_speed = data.get("WindSpeedMS")
-        wind_dir = data.get("WindDirection")
-        cloud = data.get("TotalCloudCover")
-        radiation = data.get("RadiationGlobalAccumulation") or data.get("RadiationLWAccumulation")
-
-        rows.append((dt.isoformat(), temp, wind_speed, wind_dir, cloud, radiation))
-
-    if rows:
-        insert_sql = """
-        INSERT INTO fmi_forecast (ts, temperature_c, wind_speed_ms, wind_direction_deg, cloud_cover_pct, shortwave_radiation_w_m2)
-        VALUES (%s, %s, %s, %s, %s, %s)
-        ON CONFLICT (ts) DO UPDATE
-          SET temperature_c = EXCLUDED.temperature_c,
-              wind_speed_ms = EXCLUDED.wind_speed_ms,
-              wind_direction_deg = EXCLUDED.wind_direction_deg,
-              cloud_cover_pct = EXCLUDED.cloud_cover_pct,
-              shortwave_radiation_w_m2 = EXCLUDED.shortwave_radiation_w_m2,
-              updated_at = now();
-        """
-        execute_batch(cur, insert_sql, rows, page_size=100)
-        print(f"Successfully imported {len(rows)} FMI forecast rows", file=sys.stderr, flush=True)
-    else:
-        print("No FMI forecast data rows extracted", file=sys.stderr, flush=True)
-
-    cur.close()
-    pg_conn.close()
-    print("FMI forecast import complete", file=sys.stderr, flush=True)
+  fmi_forecast_import.py: "import os\nimport sys\nimport requests\nimport psycopg2\nfrom
+    psycopg2.extras import execute_batch\nfrom lxml import etree\nfrom datetime import
+    datetime, timedelta, timezone\nfrom zoneinfo import ZoneInfo\n\nprint(\"Starting
+    FMI forecast import\", file=sys.stderr, flush=True)\n\nlat = os.environ.get(\"FMI_LAT\",
+    \"60.32128967082279\")\nlon = os.environ.get(\"FMI_LON\", \"24.87694349774082\")\n\nwfs_url
+    = \"https://opendata.fmi.fi/wfs\"\nparams = {\n    \"service\": \"WFS\",\n    \"version\":
+    \"2.0.0\",\n    \"request\": \"getFeature\",\n    \"storedquery_id\": \"fmi::forecast::harmonie::surface::point::simple\",\n
+    \   \"latlon\": f\"{lat},{lon}\",\n}\n\ntry:\n    resp = requests.get(wfs_url,
+    params=params, timeout=120)\n    resp.raise_for_status()\nexcept Exception as
+    e:\n    print(f\"Error fetching FMI data: {e}\", file=sys.stderr, flush=True)\n
+    \   sys.exit(1)\n\nroot = etree.fromstring(resp.content)\nns = {\n    \"wfs\":
+    \"http://www.opengis.net/wfs/2.0\",\n    \"BsWfs\": \"http://xml.fmi.fi/schema/wfs/2.0\",\n
+    \   \"gml\": \"http://www.opengis.net/gml/3.2\",\n}\n\ntz_utc = timezone.utc\n\ntry:\n
+    \   pg_conn = psycopg2.connect(\n        host=os.environ[\"PGHOST\"],\n        dbname=os.environ[\"PGDATABASE\"],\n
+    \       user=os.environ[\"PGUSER\"],\n        password=os.environ[\"PGPASSWORD\"],\n
+    \   )\n    pg_conn.autocommit = True\n    cur = pg_conn.cursor()\nexcept Exception
+    as e:\n    print(f\"DB connection failed: {e}\", file=sys.stderr, flush=True)\n
+    \   sys.exit(1)\n\ncur.execute(\n    \"\"\"\n    CREATE TABLE IF NOT EXISTS fmi_forecast
+    (\n      ts TIMESTAMPTZ PRIMARY KEY,\n      temperature_c DOUBLE PRECISION NULL,\n
+    \     wind_speed_ms DOUBLE PRECISION NULL,\n      wind_direction_deg DOUBLE PRECISION
+    NULL,\n      cloud_cover_pct DOUBLE PRECISION NULL,\n      shortwave_radiation_w_m2
+    DOUBLE PRECISION NULL,\n      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),\n
+    \     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()\n    );\n    \"\"\"\n)\n\ndata_by_param_ts
+    = {}\nfor member in root.findall(\".//wfs:member\", ns):\n    bs_point_tv = member.find(\".//BsWfs:BsWfsElement\",
+    ns)\n    if bs_point_tv is None:\n        continue\n\n    time_elem = bs_point_tv.find(\".//BsWfs:Time\",
+    ns)\n    param_elem = bs_point_tv.find(\".//BsWfs:ParameterName\", ns)\n    value_elem
+    = bs_point_tv.find(\".//BsWfs:ParameterValue\", ns)\n\n    if time_elem is None
+    or param_elem is None or value_elem is None:\n        continue\n\n    time_text
+    = time_elem.text\n    param_name = param_elem.text\n    value_text = value_elem.text\n\n
+    \   if not time_text or not param_name or not value_text:\n        continue\n\n
+    \   try:\n        dt = datetime.fromisoformat(time_text.replace(\"Z\", \"+00:00\"))\n
+    \       value = float(value_text)\n    except:\n        continue\n\n    ts_key
+    = dt.isoformat()\n    if ts_key not in data_by_param_ts:\n        data_by_param_ts[ts_key]
+    = {\"ts\": dt}\n\n    data_by_param_ts[ts_key][param_name] = value\n\nrows = []\nfor
+    ts_key, data in data_by_param_ts.items():\n    dt = data[\"ts\"]\n    temp = data.get(\"Temperature\")\n
+    \   wind_speed = data.get(\"WindSpeedMS\")\n    wind_dir = data.get(\"WindDirection\")\n
+    \   cloud = data.get(\"TotalCloudCover\")\n    radiation_j_m2 = data.get(\"RadiationGlobalAccumulation\")
+    or data.get(\"RadiationLWAccumulation\")\n    \n    # Convert accumulated energy
+    (J/m² over 1 hour) to instantaneous power (W/m²)\n    # 1 W = 1 J/s, so J/m² accumulated
+    over 3600 seconds → divide by 3600\n    radiation_w_m2 = radiation_j_m2 / 3600.0
+    if radiation_j_m2 is not None else None\n\n    rows.append((dt.isoformat(), temp,
+    wind_speed, wind_dir, cloud, radiation_w_m2))\n\nif rows:\n    insert_sql = \"\"\"\n
+    \   INSERT INTO fmi_forecast (ts, temperature_c, wind_speed_ms, wind_direction_deg,
+    cloud_cover_pct, shortwave_radiation_w_m2)\n    VALUES (%s, %s, %s, %s, %s, %s)\n
+    \   ON CONFLICT (ts) DO UPDATE\n      SET temperature_c = EXCLUDED.temperature_c,\n
+    \         wind_speed_ms = EXCLUDED.wind_speed_ms,\n          wind_direction_deg
+    = EXCLUDED.wind_direction_deg,\n          cloud_cover_pct = EXCLUDED.cloud_cover_pct,\n
+    \         shortwave_radiation_w_m2 = EXCLUDED.shortwave_radiation_w_m2,\n          updated_at
+    = now();\n    \"\"\"\n    execute_batch(cur, insert_sql, rows, page_size=100)\n
+    \   print(f\"Successfully imported {len(rows)} FMI forecast rows\", file=sys.stderr,
+    flush=True)\nelse:\n    print(\"No FMI forecast data rows extracted\", file=sys.stderr,
+    flush=True)\n\ncur.close()\npg_conn.close()\nprint(\"FMI forecast import complete\",
+    file=sys.stderr, flush=True)\n"
 kind: ConfigMap
 metadata:
   name: fmi-importer-script

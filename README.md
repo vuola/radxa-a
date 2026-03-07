@@ -2,6 +2,30 @@
 
 This repository documents the weather archive stack running on radxa-a.local and the upload workflow from moxa.local.
 
+## Table of Contents
+
+- [Overview](#overview)
+- [Quick Start: Maintenance & Deployment](#quick-start-maintenance--deployment)
+  - [Editing and deploying code changes](#editing-and-deploying-code-changes)
+  - [Common maintenance tasks](#common-maintenance-tasks)
+- [Components on radxa-a.local](#components-on-radxa-a-local)
+  - [Editing manifests (correct workflow)](#editing-manifests-correct-workflow)
+  - [Weather namespace resources](#weather-namespace-resources)
+  - [Storage paths](#storage-paths-radxa-a-local)
+  - [Script locations](#script-locations-radxa-a-local)
+  - [Endpoints](#endpoints)
+  - [Health monitoring](#health-monitoring)
+  - [Web UI](#web-ui-index-php)
+- [moxa.local upload workflow](#moxa-local-upload-workflow-option-a)
+- [DNS / mDNS notes](#dns--mdns-notes)
+- [Quick checks](#quick-checks)
+- [moxa.local REST API](#moxa-local-rest-api)
+- [moxa.local system reference](#moxa-local-system-reference)
+- [MQTT service (heating control)](#mqtt-service-heating-control)
+- [Moxa weather 15-minute averages](#moxa-weather-15-minute-averages)
+- [ENTSO-E day-ahead price retrieval](#entso-e-day-ahead-price-retrieval)
+- [Weather fusion Parquet export](#weather-fusion-parquet-export)
+
 ## Overview
 
 - **radxa-a.local** runs a k3s cluster that hosts:
@@ -10,6 +34,95 @@ This repository documents the weather archive stack running on radxa-a.local and
   - Daily DB backups to /media/ssd250/weather/backups
 - **moxa.local** keeps the live SQLite database and uploads an online backup once per day.
 - **Backup retention**: keep the **latest 7 dumps** via retention-based rotation to balance disk usage and safety.
+
+## Quick Start: Maintenance & Deployment
+
+This section provides the essential workflows for software maintainers.
+
+### Editing and deploying code changes
+
+**Where to edit**:
+
+- **Kubernetes manifests**: `/home/vuola/.kube-cron-jobs/local-manifests/` (e.g., weather.yaml)
+- **Web files** (PHP): `/home/vuola/.kube-cron-jobs/weather-web/` (index.php, api/health.php, export.php, ingest.php)
+- **Import scripts** (Python): `/home/vuola/.kube-cron-jobs/weather-scripts/` (entsoe_import.py, fmi_forecast_import.py, moxa_weather_import.py)
+
+**How to deploy**:
+
+```bash
+# 1. Edit files in the locations above
+
+# 2. Deploy changes (regenerates ConfigMaps and applies manifests)
+sudo /home/vuola/.kube-cron-jobs/update-cluster.sh
+
+# 3. Verify deployment
+kubectl -n weather get pods
+kubectl -n weather rollout status deployment/weather-web
+```
+
+The `update-cluster.sh` script:
+- Generates ConfigMaps from weather-web/ and weather-scripts/ directories
+- Substitutes HOSTNAME placeholders in manifests
+- Copies rendered manifests to `/var/lib/rancher/k3s/server/manifests/` for k3s auto-apply
+
+### Common maintenance tasks
+
+**Check system health**:
+```bash
+# Web UI with health status indicator
+curl http://radxa-a.local/
+
+# Health API endpoint
+curl http://radxa-a.local/api/health.php | jq
+
+# Pod status
+kubectl -n weather get pods
+```
+
+**View logs**:
+```bash
+# CronJob logs (replace job name)
+kubectl -n weather logs job/moxa-weather-15min-import-<id>
+
+# Web server logs
+kubectl -n weather logs deployment/weather-web -c nginx
+kubectl -n weather logs deployment/weather-web -c phpfpm
+
+# PostgreSQL logs
+kubectl -n weather logs statefulset/weather-postgres
+```
+
+**Database access**:
+```bash
+# Connect to PostgreSQL
+kubectl -n weather exec -it statefulset/weather-postgres -- psql -U weather -d weather
+
+# Check table sizes
+kubectl -n weather exec statefulset/weather-postgres -- psql -U weather -d weather -c \
+  "SELECT schemaname, tablename, pg_size_pretty(pg_total_relation_size(schemaname||'.'||tablename)) AS size \
+   FROM pg_tables WHERE schemaname = 'public' ORDER BY pg_total_relation_size(schemaname||'.'||tablename) DESC;"
+```
+
+**Backup management**:
+```bash
+# List backups
+ls -lh /media/ssd250/weather/backups/
+
+# Manually trigger backup
+kubectl -n weather create job --from=cronjob/weather-postgres-backup manual-backup-$(date +%s)
+
+# Restore from backup
+kubectl -n weather exec -it statefulset/weather-postgres -- psql -U weather -d weather < /path/to/backup.sql
+```
+
+**Restart services**:
+```bash
+# Restart web server
+kubectl -n weather rollout restart deployment/weather-web
+
+# Restart PostgreSQL (careful - brief downtime)
+kubectl -n weather delete pod weather-postgres-0
+```
 
 ## Components on radxa-a.local
 
@@ -69,9 +182,70 @@ Deployed in namespace `weather`:
 ### Endpoints
 
 - Web UI: http://radxa-a.local/
+- Health API: http://radxa-a.local/api/health.php
 - Ingest endpoint:
   - POST JSON to http://radxa-a.local/ingest.php
   - Upload SQLite file as multipart field `sqlite` to the same endpoint
+
+### Health monitoring
+
+The weather stack includes a health monitoring system that provides real-time visibility into system status.
+
+**Health API endpoint**: `/api/health.php`
+
+Returns JSON with overall system status and any failing checks:
+
+```json
+{
+  "overall_status": "ok",
+  "checked_at": "2026-03-07T19:07:09Z",
+  "failures": []
+}
+```
+
+**Status levels**:
+- `ok` — All checks passing
+- `warn` — Minor issues detected (e.g., moxa data 20-60 minutes stale)
+- `error` — Critical issues (e.g., database unreachable, backups failed)
+
+**Health checks performed**:
+
+1. **Database connectivity** — PostgreSQL responds to `SELECT 1`
+2. **Moxa 15-min data freshness** — Latest `moxa_weather_15min` row age:
+   - ≤20 minutes: OK
+   - ≤60 minutes: WARN (data delayed)
+   - >60 minutes: ERROR (import likely failing)
+3. **FMI forecast horizon** — Forecast covers at least +6 hours ahead
+4. **ENTSOE prices coverage** — Today's price data present
+5. **Backup validity** — Latest backup:
+   - Age ≤26 hours (nightly backup at 02:15)
+   - File size ≥100KB (validates against zero-byte dumps)
+6. **Parquet export freshness** — Latest export age ≤30 minutes
+
+**Web UI integration**:
+
+The main page displays a health status indicator at the top:
+- **Green dot + "System OK"** — All checks passing
+- **Yellow dot + "System WARNING"** — Non-critical issues detected
+- **Red dot + "System ERROR"** — Critical failures present
+
+When issues are detected, the indicator expands to show failure details. Auto-refreshes every 60 seconds.
+
+**Manual health check**:
+```bash
+# JSON output
+curl http://radxa-a.local/api/health.php | jq
+
+# Check specific details
+curl -s http://radxa-a.local/api/health.php | jq '.failures[]'
+```
+
+**Troubleshooting common failures**:
+
+- **Moxa data stale**: Check moxa.local is reachable and `moxa-weather-15min-import` CronJob is running
+- **Backup failed**: Check `/media/ssd250/weather/backups/` for recent dumps, view backup CronJob logs
+- **FMI forecast stale**: Check `fmi-forecast-import` CronJob logs, verify FMI API is accessible
+- **ENTSOE prices missing**: Check ENTSO-E API key secret, verify `entsoe-dayahead-import` ran successfully
 
 ### Web UI (index.php)
 
@@ -88,7 +262,7 @@ The web interface displays a curated selection of 13 columns from the 22-column 
 7. **FC_Dir** - Forecast wind direction (degrees) from FMI
 8. **Moxa_Dir** - Measured wind direction (degrees) from moxa.local
 9. **FC_Cloud** - Forecast cloud cover (%) from FMI
-10. **FC_Rad** - Forecast solar radiation (kW/m², converted from W/m²) from FMI
+10. **FC_Rad** - Forecast solar radiation (W/m²) from FMI
 11. **PV_Feed** - PV system feed-in power (W) from moxa.local
 12. **Active_Power** - Active power at point of common coupling (W) from moxa.local
 13. **Battery_SOC** - Battery state of charge (%) from moxa.local

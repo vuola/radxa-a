@@ -104,9 +104,13 @@ for ts_key, data in data_by_param_ts.items():
     wind_speed = data.get("WindSpeedMS")
     wind_dir = data.get("WindDirection")
     cloud = data.get("TotalCloudCover")
-    radiation = data.get("RadiationGlobalAccumulation") or data.get("RadiationLWAccumulation")
+    radiation_j_m2 = data.get("RadiationGlobalAccumulation") or data.get("RadiationLWAccumulation")
+    
+    # Convert accumulated energy (J/m² over 1 hour) to instantaneous power (W/m²)
+    # 1 W = 1 J/s, so J/m² accumulated over 3600 seconds → divide by 3600
+    radiation_w_m2 = radiation_j_m2 / 3600.0 if radiation_j_m2 is not None else None
 
-    rows.append((dt.isoformat(), temp, wind_speed, wind_dir, cloud, radiation))
+    rows.append((dt.isoformat(), temp, wind_speed, wind_dir, cloud, radiation_w_m2))
 
 if rows:
     insert_sql = """

@@ -254,6 +254,33 @@ Quick recreate checklist
 5. Add `www-data` to `dialout` and reload systemd.
 
 
+SQLite backup and upload to radxa-a.local
+------------------------------------------
+
+Daily backup and upload workflow (runs at midnight):
+
+- Service: `/etc/systemd/system/moxa-archive-upload.service`
+- Timer: `/etc/systemd/system/moxa-archive-upload.timer`
+- Script: `/usr/local/bin/moxa-upload-archive.sh` (repo: `moxa-upload-archive.sh`)
+
+The script:
+1. Creates an online SQLite backup to `/var/lib/moxa/archive/weather_YYYYMMDD_HHMMSS.db`
+2. Uploads the backup to `http://radxa-a.local/ingest.php` as multipart field `sqlite`
+3. On success, prunes rows older than 24 hours and checkpoints WAL
+4. Removes the temporary backup file
+
+Check backup status:
+```bash
+sudo systemctl status moxa-archive-upload.timer moxa-archive-upload.service --no-pager
+sudo journalctl -u moxa-archive-upload.service -n 50 --no-pager
+ls -la /var/lib/moxa/archive/
+```
+
+Manual trigger (for testing):
+```bash
+sudo systemctl start moxa-archive-upload.service
+```
+
 REST API — averaged weather row
 -------------------------------
 
@@ -261,7 +288,7 @@ Endpoint (Apache/PHP):
 - `/api/avg.php`
 
 Query parameters:
-- `n` (required): number of newest 1‑minute rows used for averaging.
+- `n` (required): number of newest 1‑minute rows used for averaging (number of samples, not seconds).
 - `cols` (required): comma‑separated column names to return.
 
 Wind averaging:
@@ -298,4 +325,26 @@ Response (example):
     }
   }
 }
+```
+
+Health check endpoint
+--------------------
+
+Endpoint (Apache/PHP):
+- `/api/health.php`
+
+Returns system health status as JSON:
+- **backup_freshness**: Checks age of last backup in `/var/lib/moxa/archive/`
+  - Status `ok` if backup is ≤24 hours old
+  - Status `error` if backup is >24 hours old or missing
+- **database**: Checks SQLite database accessibility and row count
+
+The web UI (`index.html`) displays health status at the top of the page:
+- Green ✓ if all systems healthy
+- Red ✗ if backup is stale or database has issues
+- Auto-refreshes every 60 seconds
+
+Example:
+```bash
+curl -s http://moxa.local/api/health.php
 ```
