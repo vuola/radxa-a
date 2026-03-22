@@ -11,6 +11,7 @@ fmi_manifest="$local_manifests_dir/fmi-importer-script.yaml"
 moxa_manifest="$local_manifests_dir/moxa-weather-importer-script.yaml"
 sqlite_manifest="$local_manifests_dir/weather-sqlite-import-script.yaml"
 fusion_view_manifest="$local_manifests_dir/create-fusion-view-script.yaml"
+pv_forecast_manifest="$local_manifests_dir/pv-forecast-script.yaml"
 new_host="$(hostname)"
 
 generate_weather_web_config() {
@@ -19,6 +20,7 @@ generate_weather_web_config() {
     kubectl create configmap weather-web-config \
       --from-file=nginx.conf="$web_files_dir/nginx.conf" \
       --from-file=index.php="$web_files_dir/index.php" \
+      --from-file=forecast.php="$web_files_dir/forecast.php" \
       --from-file=export.php="$web_files_dir/export.php" \
       --from-file=ingest.php="$web_files_dir/ingest.php" \
       --from-file=health.php="$web_files_dir/api/health.php" \
@@ -75,6 +77,14 @@ generate_weather_script_configs() {
       --from-file=export_fusion_parquet.py="$scripts_dir/export_fusion_parquet.py" \
       -n weather \
       --dry-run=client -o yaml > "$local_manifests_dir/export-fusion-parquet-script.yaml"
+  fi
+
+  if [ -f "$scripts_dir/pv_forecast_baseline.py" ]; then
+    echo "Generating pv-forecast-script ConfigMap from: $scripts_dir/pv_forecast_baseline.py"
+    kubectl create configmap pv-forecast-script \
+      --from-file=pv_forecast_baseline.py="$scripts_dir/pv_forecast_baseline.py" \
+      -n weather \
+      --dry-run=client -o yaml > "$pv_forecast_manifest"
   fi
 }
 

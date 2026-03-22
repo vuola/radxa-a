@@ -562,6 +562,8 @@ spec:
             items:
               - key: index.php
                 path: index.php
+              - key: forecast.php
+                path: forecast.php
               - key: export.php
                 path: export.php
               - key: ingest.php
@@ -785,6 +787,73 @@ spec:
             - name: moxa-importer-script
               configMap:
                 name: moxa-weather-importer-script
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: pv-forecast-15min
+  namespace: weather
+spec:
+  schedule: "7,22,37,52 * * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: pv-forecast
+              image: docker.io/library/python:3.11-slim
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: PGHOST
+                  value: weather-postgres
+                - name: PGDATABASE
+                  valueFrom:
+                    secretKeyRef:
+                      name: weather-db
+                      key: MYSQL_DATABASE
+                - name: PGUSER
+                  valueFrom:
+                    secretKeyRef:
+                      name: weather-db
+                      key: MYSQL_USER
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: weather-db
+                      key: MYSQL_PASSWORD
+                - name: FORECAST_CUTOFF_TS
+                  value: "2026-03-06 17:45:00+00"
+                - name: FORECAST_HORIZON_HOURS
+                  value: "24"
+                - name: FORECAST_TRAIN_DAYS
+                  value: "30"
+                - name: FORECAST_MIN_RADIATION
+                  value: "20"
+                - name: FORECAST_PV_ACTIVE_THRESHOLD_W
+                  value: "100"
+                - name: FORECAST_LOCAL_TZ
+                  value: "Europe/Helsinki"
+                - name: FORECAST_MODEL_NAME
+                  value: "pv_radiation_ratio"
+                - name: FORECAST_MODEL_VERSION
+                  value: "v2_windowed"
+              command:
+                - /bin/bash
+                - -c
+              args:
+                - |
+                  set -e
+                  python -m pip install --no-cache-dir psycopg2-binary
+                  python /opt/forecast/pv_forecast_baseline.py
+              volumeMounts:
+                - name: pv-forecast-script
+                  mountPath: /opt/forecast/pv_forecast_baseline.py
+                  subPath: pv_forecast_baseline.py
+          volumes:
+            - name: pv-forecast-script
+              configMap:
+                name: pv-forecast-script
 ---
 apiVersion: v1
 kind: Service

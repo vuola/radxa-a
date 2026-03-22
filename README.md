@@ -25,6 +25,7 @@ This repository documents the weather archive stack running on radxa-a.local and
 - [Moxa weather 15-minute averages](#moxa-weather-15-minute-averages)
 - [ENTSO-E day-ahead price retrieval](#entso-e-day-ahead-price-retrieval)
 - [Weather fusion Parquet export](#weather-fusion-parquet-export)
+- [Solar production forecasting (PV feed-in)](#solar-production-forecasting-pv-feed-in)
 
 ## Overview
 
@@ -507,13 +508,14 @@ The MOXA.md file is a copy from the actual weather station server and should be 
 
 ## MQTT service (heating control)
 
-The weather stack also exposes an MQTT broker (Eclipse Mosquitto) in the `weather` namespace. A NodePort service is published on the LAN at port 31884 (TCP) and is used to switch the geothermal pump & water warmer between **ALLOW** (external grid power allowed) and **PROHIBIT** (external grid power disallowed during peak tariff hours).
+The weather stack also exposes an MQTT broker (Eclipse Mosquitto) in the `weather` namespace. A NodePort service is published on the LAN at port 31884 (TCP) and is used to switch the geothermal pump & water warmer between **ALLOW** (external grid power allowed) and **PROHIBIT** (external grid power disallowed during peak tariff hours). For safety reasons these two commands are combined in a third command **PROHIBIT_60** where 60 is the minute length of a PROHIBIT interval. After the interval is over, the geothermal pump & water warmer are automatically switched to the **ALLOW** state again, without the need for a separate allow commmand. This is a fail-safe feature which ensures geothermal pump starting in the event that data connection would be lost between the server and the pump relay during **PROHIBIT** mode. Any time interval up to 720 minutes can be used.
 
 Switching commands to test manually in the home domain:
 
 ```
 mosquitto_pub -h 192.168.68.111 -p 31884 -t ivt/heating/mode/set -m PROHIBIT -q 1 -r
 mosquitto_pub -h 192.168.68.111 -p 31884 -t ivt/heating/mode/set -m ALLOW -q 1 -r
+mosquitto_pub -h 192.168.68.111 -p 31884 -t ivt/heating/mode/set -m PROHIBIT_30
 ```
 This works also from radxa-a.local command prompt in case the mosquitto services are installed:
 ```
@@ -830,3 +832,116 @@ The Parquet export enables automated control of the geothermal heat pump based o
 5. Publishes control commands to MQTT broker (`mqtt.weather.svc.cluster.local:1883`)
 
 The 15-minute granularity aligns with ENTSO-E price intervals, allowing precise cost optimization.
+
+## Solar production forecasting (PV feed-in)
+
+The weather stack includes an adaptive photovoltaic production forecaster that predicts `pv_feed_in_w` for the next 24 hours at 15-minute resolution.
+
+### Purpose
+
+- Produce short-term PV feed-in forecasts for control planning
+- Store forecast history and metadata for forecast-vs-actual analysis
+- Avoid non-physical night-time production forecasts
+
+### Data source and target
+
+- **Input source**: `weather_fusion` view
+- **Target**: `moxa_weather_15min.pv_feed_in_w`
+- **Cadence**: every 15 minutes
+- **Horizon**: 24 hours (`96` rows per run)
+
+### Forecast model (current baseline)
+
+Script:
+
+- `/home/vuola/.kube-cron-jobs/weather-scripts/pv_forecast_baseline.py`
+
+Current model is a robust baseline:
+
+1. Fit a radiation-to-PV ratio from recent history:
+  - Uses `fc_shortwave_radiation_w_m2` and measured `moxa_pv_feed_in_w`
+  - Uses data after cutoff `FORECAST_CUTOFF_TS` (default `2026-03-06 17:45:00+00`)
+2. Learn adaptive active production window from real PV behavior:
+  - For each recent day, detect first and last local times when `pv_feed_in_w >= FORECAST_PV_ACTIVE_THRESHOLD_W` (default `100 W`)
+  - Use median start/stop across valid days as current production window
+3. Forecast rule:
+  - Outside active window: `yhat_p50 = 0`
+  - Inside window and with low radiation (`< FORECAST_MIN_RADIATION`, default `20 W/m2`): `yhat_p50 = 0`
+  - Otherwise: `yhat_p50 = ratio * fc_shortwave_radiation_w_m2`
+4. Uncertainty bands are stored as `p10/p90`.
+
+This adaptive window accounts for real-world delays between sunrise/sunset and actual inverter production/idle behavior.
+
+### Storage tables
+
+Forecast outputs are stored in PostgreSQL:
+
+- `forecast_run`: one row per forecast run (model metadata, issue time, notes)
+- `forecast_value`: one row per forecast timestamp per run (`yhat_p50`, `yhat_p10`, `yhat_p90`)
+
+Typical query:
+
+```bash
+kubectl -n weather exec statefulset/weather-postgres -- psql -U weather -d weather -c \
+  "SELECT run_id, model_name, model_version, issued_at, notes FROM forecast_run ORDER BY run_id DESC LIMIT 5;"
+```
+
+### Kubernetes scheduling
+
+The model is executed by CronJob:
+
+- **CronJob**: `pv-forecast-15min`
+- **Schedule**: `7,22,37,52 * * * *`
+- **Container**: `python:3.11-slim`
+- **ConfigMap script**: `pv-forecast-script`
+
+ConfigMap generation is handled by:
+
+- `/home/vuola/.kube-cron-jobs/update-cluster.sh`
+
+Deployment workflow is unchanged:
+
+```bash
+sudo /home/vuola/.kube-cron-jobs/update-cluster.sh
+kubectl -n weather get cronjob pv-forecast-15min
+```
+
+### Forecast vs actual UI
+
+A dedicated mobile-focused page is available:
+
+- `http://radxa-a.local/forecast.php`
+
+It shows latest run forecasts against measured `moxa_pv_feed_in_w` and includes a simple MAE indicator.
+
+### Manual test and troubleshooting
+
+Trigger one manual run:
+
+```bash
+kubectl -n weather create job --from=cronjob/pv-forecast-15min pv-forecast-test-$(date +%s)
+```
+
+Check job logs:
+
+```bash
+kubectl -n weather logs job/<pv-forecast-test-job-name>
+```
+
+Common checks:
+
+```bash
+# CronJob status
+kubectl -n weather get cronjob pv-forecast-15min
+
+# Latest runs and model metadata
+kubectl -n weather exec statefulset/weather-postgres -- psql -U weather -d weather -c \
+  "SELECT run_id, model_name, model_version, issued_at FROM forecast_run ORDER BY run_id DESC LIMIT 10;"
+
+# Night-time suppression sanity check (local time)
+kubectl -n weather exec statefulset/weather-postgres -- psql -U weather -d weather -c \
+  "WITH latest AS (SELECT run_id FROM forecast_run ORDER BY run_id DESC LIMIT 1) \
+  SELECT (target_ts AT TIME ZONE 'Europe/Helsinki') AS local_ts, yhat_p50 \
+  FROM forecast_value WHERE run_id = (SELECT run_id FROM latest) \
+  ORDER BY target_ts ASC LIMIT 20;"
+```

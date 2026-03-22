@@ -68,6 +68,7 @@ $todayLink = '?date=today';
 $tomorrowLink = '?date=tomorrow';
 echo "<p>Date: " . htmlspecialchars($startLocal->format('Y-m-d')) . " (Europe/Helsinki)</p>";
 echo "<p>Toggle: <a href=\"{$todayLink}\">Today</a> | <a href=\"{$tomorrowLink}\">Tomorrow</a></p>";
+echo "<p><a href=\"/forecast.php\">Forecast vs Actual (mobile view)</a></p>";
 
 echo "<div class=\"legend\"><h3>Column Legend</h3><ol>";
 echo "<li>Time (HH:MM)</li>";
