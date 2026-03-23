@@ -5,6 +5,7 @@ This repository documents the weather archive stack running on radxa-a.local and
 ## Table of Contents
 
 - [Overview](#overview)
+- [Cluster Architecture](#cluster-architecture)
 - [Quick Start: Maintenance & Deployment](#quick-start-maintenance--deployment)
   - [Editing and deploying code changes](#editing-and-deploying-code-changes)
   - [Common maintenance tasks](#common-maintenance-tasks)
@@ -35,6 +36,77 @@ This repository documents the weather archive stack running on radxa-a.local and
   - Daily DB backups to /media/ssd250/weather/backups
 - **moxa.local** keeps the live SQLite database and uploads an online backup once per day.
 - **Backup retention**: keep the **latest 7 dumps** via retention-based rotation to balance disk usage and safety.
+
+## Cluster Architecture
+
+The weather stack runs on a dual-node k3s cluster for improved performance and partial resilience:
+
+### Node roles
+
+- **radxa-a** (192.168.68.111): Kubernetes control plane + worker node
+  - Hosts stateful services (PostgreSQL database)
+  - Stores data on local SSD: `/media/ssd250/weather/`
+  - Runs storage-coupled CronJobs (backups, parquet exports)
+- **radxa-b** (192.168.68.128): Kubernetes agent/worker node
+  - Runs stateless workloads (API calls, data imports, forecasting)
+  - Offloads compute-heavy jobs from the control plane
+  - No persistent storage (ephemeral pod volumes only)
+
+### Workload distribution
+
+Workloads are scheduled using `nodeSelector: kubernetes.io/hostname: <node-name>` to ensure:
+
+| Workload | Node | Reason |
+|----------|------|--------|
+| PostgreSQL StatefulSet | radxa-a | Database must access `/media/ssd250/weather/postgres` |
+| Web server (NGINX + PHP) | radxa-a | Serves weather data and health API |
+| Backup CronJob | radxa-a | Writes backups to local SSD |
+| SQLite import | radxa-a | Imports uploaded backups into PostgreSQL |
+| Parquet export | radxa-a | Writes Parquet files to `/media/ssd250/weather/exports/` |
+| FMI forecast import | radxa-b | Stateless API call to FMI service |
+| ENTSO-E price import | radxa-b | Stateless API call to ENTSO-E service |
+| Moxa weather import | radxa-b | Stateless REST call to moxa.local |
+| Fusion view refresh | radxa-b | Stateless SQL query |
+| PV forecast generation | radxa-b | Stateless ML-based forecast |
+
+### Benefits and limitations
+
+**Benefits**:
+- Reduced CPU contention on radxa-a (control plane + DB + web server)
+- Stateless jobs run in parallel on radxa-b without blocking critical services
+- Improved responsiveness of the web UI during forecast/import runs
+
+**Limitations**:
+- No high-availability control plane (single radxa-a failure brings down cluster)
+- No database replication (backup-only strategy remains primary recovery method)
+- Network isolation: both nodes must be on the same LAN with mDNS or static DNS
+
+Full HA would require a 3-node control plane, PostgreSQL replication, and external load balancer—currently not deployed.
+
+### Verification
+
+Check cluster status:
+
+```bash
+kubectl get nodes -o wide
+```
+
+Expected output:
+```
+NAME      STATUS   ROLES                  AGE     VERSION
+radxa-a   Ready    control-plane,master   ...     v1.34.3+k3s1
+radxa-b   Ready    worker                 ...     v1.34.3+k3s1
+```
+
+Verify pod placement by node:
+
+```bash
+# Storage-coupled pods on radxa-a
+kubectl -n weather get pods -o wide | grep radxa-a
+
+# Stateless jobs on radxa-b
+kubectl -n weather get pods -o wide | grep radxa-b
+```
 
 ## Quick Start: Maintenance & Deployment
 

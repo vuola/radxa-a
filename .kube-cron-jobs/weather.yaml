@@ -72,6 +72,8 @@ spec:
       labels:
         app: weather-postgres
     spec:
+      nodeSelector:
+        kubernetes.io/hostname: radxa-a
       containers:
         - name: postgres
           image: docker.io/library/postgres:16-alpine
@@ -132,7 +134,7 @@ spec:
         spec:
           restartPolicy: OnFailure
           nodeSelector:
-            kubernetes.io/hostname: radxa-a
+            kubernetes.io/hostname: radxa-b
           containers:
             - name: backup
               image: docker.io/library/postgres:16-alpine
@@ -202,6 +204,8 @@ spec:
     spec:
       template:
         spec:
+          nodeSelector:
+            kubernetes.io/hostname: radxa-b
           restartPolicy: OnFailure
           containers:
             - name: importer
@@ -473,6 +477,7 @@ spec:
       labels:
         app: weather-web
     spec:
+
       initContainers:
         - name: inbox-permissions
           image: docker.io/library/busybox:1.36
