@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import math
 import os
 import sys
 from datetime import datetime, timedelta, timezone
@@ -17,15 +18,125 @@ def align_to_15m(ts: datetime) -> datetime:
     return ts.replace(minute=aligned_minute, second=0, microsecond=0)
 
 
+def _clip(value: float, low: float, high: float) -> float:
+    return min(max(value, low), high)
+
+
+def cloud_factor(cloud_pct: float, cloud_floor: float, cloud_exp: float) -> float:
+    cloud_pct = _clip(cloud_pct, 0.0, 100.0)
+    clear_sky_frac = 1.0 - cloud_pct / 100.0
+    return cloud_floor + (1.0 - cloud_floor) * (clear_sky_frac ** cloud_exp)
+
+
+def solar_position_noaa(ts_utc: datetime, lat_deg: float, lon_deg: float) -> tuple[float, float]:
+    """Return (solar_elevation_rad, solar_azimuth_rad) using NOAA approximation.
+
+    Azimuth is clockwise from north.
+    """
+    ts_utc = ts_utc.astimezone(timezone.utc)
+    day_of_year = ts_utc.timetuple().tm_yday
+    minute_of_day = ts_utc.hour * 60.0 + ts_utc.minute + ts_utc.second / 60.0
+
+    gamma = 2.0 * math.pi / 365.0 * (day_of_year - 1 + (minute_of_day / 60.0 - 12.0) / 24.0)
+    eq_time = 229.18 * (
+        0.000075
+        + 0.001868 * math.cos(gamma)
+        - 0.032077 * math.sin(gamma)
+        - 0.014615 * math.cos(2.0 * gamma)
+        - 0.040849 * math.sin(2.0 * gamma)
+    )
+    decl = (
+        0.006918
+        - 0.399912 * math.cos(gamma)
+        + 0.070257 * math.sin(gamma)
+        - 0.006758 * math.cos(2.0 * gamma)
+        + 0.000907 * math.sin(2.0 * gamma)
+        - 0.002697 * math.cos(3.0 * gamma)
+        + 0.00148 * math.sin(3.0 * gamma)
+    )
+
+    true_solar_time = minute_of_day + eq_time + 4.0 * lon_deg
+    true_solar_time = true_solar_time % 1440.0
+
+    hour_angle_deg = true_solar_time / 4.0 - 180.0
+    if hour_angle_deg < -180.0:
+        hour_angle_deg += 360.0
+    hour_angle = math.radians(hour_angle_deg)
+
+    lat = math.radians(lat_deg)
+    cos_zenith = (
+        math.sin(lat) * math.sin(decl)
+        + math.cos(lat) * math.cos(decl) * math.cos(hour_angle)
+    )
+    cos_zenith = _clip(cos_zenith, -1.0, 1.0)
+    zenith = math.acos(cos_zenith)
+    elevation = math.pi / 2.0 - zenith
+
+    azimuth = math.atan2(
+        math.sin(hour_angle),
+        math.cos(hour_angle) * math.sin(lat) - math.tan(decl) * math.cos(lat),
+    ) + math.pi
+    azimuth = azimuth % (2.0 * math.pi)
+    return elevation, azimuth
+
+
+def panel_gain(
+    ts_utc: datetime,
+    lat_deg: float,
+    lon_deg: float,
+    panel_tilt_deg: float,
+    panel_azimuth_deg: float,
+    panel_diffuse_floor: float,
+    min_solar_elevation_deg: float,
+) -> float:
+    elev_rad, az_rad = solar_position_noaa(ts_utc, lat_deg, lon_deg)
+    if elev_rad <= math.radians(min_solar_elevation_deg):
+        return panel_diffuse_floor
+
+    # Sun vector in ENU frame.
+    sun_e = math.cos(elev_rad) * math.sin(az_rad)
+    sun_n = math.cos(elev_rad) * math.cos(az_rad)
+    sun_u = math.sin(elev_rad)
+
+    tilt = math.radians(panel_tilt_deg)
+    panel_az = math.radians(panel_azimuth_deg)
+    # Panel normal in ENU frame (azimuth clockwise from north).
+    n_e = math.sin(tilt) * math.sin(panel_az)
+    n_n = math.sin(tilt) * math.cos(panel_az)
+    n_u = math.cos(tilt)
+
+    cos_aoi = sun_e * n_e + sun_n * n_n + sun_u * n_u
+    cos_aoi = _clip(cos_aoi, 0.0, 1.0)
+    return panel_diffuse_floor + (1.0 - panel_diffuse_floor) * cos_aoi
+
+
 def main() -> int:
-    cutoff_ts = read_env("FORECAST_CUTOFF_TS", "2026-03-06 17:45:00+00")
+    cutoff_ts = read_env("FORECAST_CUTOFF_TS", "2026-02-01 00:00:00+00")
     horizon_hours = int(read_env("FORECAST_HORIZON_HOURS", "24"))
-    train_days = int(read_env("FORECAST_TRAIN_DAYS", "30"))
+    train_days = int(read_env("FORECAST_TRAIN_DAYS", "120"))
     min_radiation = float(read_env("FORECAST_MIN_RADIATION", "20"))
     bootstrap_ratio = float(read_env("FORECAST_BOOTSTRAP_RATIO", "85"))
     min_train_samples = int(read_env("FORECAST_MIN_TRAIN_SAMPLES", "32"))
-    model_name = read_env("FORECAST_MODEL_NAME", "pv_radiation_ratio")
-    model_version = read_env("FORECAST_MODEL_VERSION", "v1")
+    cloud_floor = float(read_env("FORECAST_CLOUD_FLOOR", "0.25"))
+    cloud_exp = float(read_env("FORECAST_CLOUD_EXP", "1.0"))
+    site_lat = float(read_env("FORECAST_SITE_LAT", read_env("FMI_LAT", "60.32128967082279")))
+    site_lon = float(read_env("FORECAST_SITE_LON", read_env("FMI_LON", "24.87694349774082")))
+    panel_tilt_deg = float(read_env("FORECAST_PANEL_TILT_DEG", "11"))
+    panel_azimuth_deg = float(read_env("FORECAST_PANEL_AZIMUTH_DEG", "90"))
+    panel_diffuse_floor = float(read_env("FORECAST_PANEL_DIFFUSE_FLOOR", "0.30"))
+    min_solar_elevation_deg = float(read_env("FORECAST_MIN_SOLAR_ELEVATION_DEG", "-3.0"))
+    max_pv_w = float(read_env("FORECAST_MAX_PV_W", "41900"))
+    model_name = read_env("FORECAST_MODEL_NAME", "pv_radiation_cloud_ratio")
+    model_version = read_env("FORECAST_MODEL_VERSION", "v2")
+
+    # Keep cloud attenuation parameters in sensible bounds.
+    cloud_floor = min(max(cloud_floor, 0.0), 1.0)
+    cloud_exp = min(max(cloud_exp, 0.1), 3.0)
+    panel_tilt_deg = _clip(panel_tilt_deg, 0.0, 90.0)
+    panel_azimuth_deg = panel_azimuth_deg % 360.0
+    panel_diffuse_floor = _clip(panel_diffuse_floor, 0.0, 1.0)
+    min_solar_elevation_deg = _clip(min_solar_elevation_deg, -12.0, 20.0)
+    max_pv_w = max(0.0, max_pv_w)
 
     now_utc = datetime.now(timezone.utc)
     issue_ts = align_to_15m(now_utc)
@@ -75,22 +186,48 @@ def main() -> int:
                 cur.execute(
                     """
                     SELECT
-                      COALESCE(
-                        SUM(fc_shortwave_radiation_w_m2 * moxa_pv_feed_in_w)
-                        / NULLIF(SUM(fc_shortwave_radiation_w_m2 * fc_shortwave_radiation_w_m2), 0),
-                        0
-                      ) AS ratio,
-                      COUNT(*) AS sample_count
+                      ts,
+                      moxa_pv_feed_in_w,
+                      fc_shortwave_radiation_w_m2,
+                      fc_cloud_cover_pct
                     FROM weather_fusion
                     WHERE ts >= %s::timestamptz
                       AND ts >= now() - (%s || ' days')::interval
                       AND moxa_pv_feed_in_w IS NOT NULL
                       AND fc_shortwave_radiation_w_m2 IS NOT NULL
-                      AND fc_shortwave_radiation_w_m2 >= %s;
+                    ORDER BY ts ASC;
                     """,
-                    (cutoff_ts, str(train_days), min_radiation),
+                    (cutoff_ts, str(train_days)),
                 )
-                ratio, sample_count = cur.fetchone()
+                train_rows = cur.fetchall()
+
+                numerator = 0.0
+                denominator = 0.0
+                sample_count = 0
+                for ts, actual, radiation, cloud_cover in train_rows:
+                    radiation_val = float(radiation or 0.0)
+                    if radiation_val < min_radiation:
+                        continue
+                    cloud_pct = float(cloud_cover) if cloud_cover is not None else 50.0
+                    c_factor = cloud_factor(cloud_pct, cloud_floor, cloud_exp)
+                    s_gain = panel_gain(
+                        ts,
+                        site_lat,
+                        site_lon,
+                        panel_tilt_deg,
+                        panel_azimuth_deg,
+                        panel_diffuse_floor,
+                        min_solar_elevation_deg,
+                    )
+                    effective_radiation = radiation_val * c_factor * s_gain
+                    if effective_radiation <= 0.0:
+                        continue
+                    actual_val = float(actual or 0.0)
+                    numerator += effective_radiation * actual_val
+                    denominator += effective_radiation * effective_radiation
+                    sample_count += 1
+
+                ratio = numerator / denominator if denominator > 0.0 else 0.0
 
                 learned_ratio = float(max(0.0, ratio or 0.0))
                 if sample_count < min_train_samples or learned_ratio <= 0.0:
@@ -123,7 +260,13 @@ def main() -> int:
                             f"ratio_used={ratio_used:.6f}, ratio_learned={learned_ratio:.6f}, "
                             f"ratio_source={ratio_source}, samples={sample_count}, "
                             f"min_train_samples={min_train_samples}, train_days={train_days}, "
-                            f"windowing=disabled, min_radiation={min_radiation:.1f}"
+                            f"windowing=disabled, min_radiation={min_radiation:.1f}, "
+                            f"cloud_floor={cloud_floor:.2f}, cloud_exp={cloud_exp:.2f}, "
+                            f"site_lat={site_lat:.5f}, site_lon={site_lon:.5f}, "
+                            f"panel_tilt_deg={panel_tilt_deg:.1f}, panel_azimuth_deg={panel_azimuth_deg:.1f}, "
+                            f"panel_diffuse_floor={panel_diffuse_floor:.2f}, "
+                            f"min_solar_elevation_deg={min_solar_elevation_deg:.1f}, "
+                            f"max_pv_w={max_pv_w:.1f}"
                         ),
                     ),
                 )
@@ -133,7 +276,8 @@ def main() -> int:
                     """
                     SELECT
                       ts,
-                      fc_shortwave_radiation_w_m2
+                                            fc_shortwave_radiation_w_m2,
+                                            fc_cloud_cover_pct
                     FROM weather_fusion
                     WHERE ts >= %s
                       AND ts < %s
@@ -148,13 +292,30 @@ def main() -> int:
                     return 1
 
                 payload = []
-                for ts, radiation in rows:
+                for ts, radiation, cloud_cover in rows:
                     radiation_val = float(radiation or 0.0)
+                    cloud_pct = float(cloud_cover) if cloud_cover is not None else 50.0
+                    c_factor = cloud_factor(cloud_pct, cloud_floor, cloud_exp)
+                    s_gain = panel_gain(
+                        ts,
+                        site_lat,
+                        site_lon,
+                        panel_tilt_deg,
+                        panel_azimuth_deg,
+                        panel_diffuse_floor,
+                        min_solar_elevation_deg,
+                    )
+                    effective_radiation = radiation_val * c_factor * s_gain
+
                     if radiation_val >= min_radiation:
-                        yhat = max(0.0, ratio_used * radiation_val)
+                        yhat = max(0.0, ratio_used * effective_radiation)
                     else:
                         yhat = 0.0
-                    band = max(150.0, 0.2 * yhat)
+                    yhat = min(yhat, max_pv_w)
+                    cloud_frac = _clip(cloud_pct, 0.0, 100.0) / 100.0
+                    band = max(150.0, yhat * (0.15 + 0.35 * cloud_frac))
+                    yhat_low = max(0.0, yhat - band)
+                    yhat_high = min(max_pv_w, yhat + band)
                     payload.append(
                         (
                             run_id,
@@ -162,8 +323,8 @@ def main() -> int:
                             ts,
                             int((ts - issue_ts).total_seconds() // 60),
                             yhat,
-                            max(0.0, yhat - band),
-                            yhat + band,
+                            yhat_low,
+                            yhat_high,
                         )
                     )
 

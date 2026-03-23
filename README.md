@@ -861,22 +861,33 @@ Script:
 
 - `/home/vuola/.kube-cron-jobs/weather-scripts/pv_forecast_baseline.py`
 
-Current model is a robust baseline:
+Current model is a robust baseline (`pv_radiation_cloud_ratio`), currently deployed as version `v3_aoi_roof_cap_tuned_20260323` (see override table below):
 
-1. Fit a radiation-to-PV ratio from recent history:
-  - Uses `fc_shortwave_radiation_w_m2` and measured `moxa_pv_feed_in_w`
-  - Uses data after cutoff `FORECAST_CUTOFF_TS` (current default `2026-03-23 06:19:00+00`, i.e. post radiation-fix window)
+1. Fit a radiation-to-PV ratio from longer history:
+  - Uses measured `moxa_pv_feed_in_w` and an effective-radiation feature derived from forecast radiation and cloud cover.
+  - Effective radiation:
+    `effective_rad = fc_shortwave_radiation_w_m2 * cloud_factor * panel_gain`
+  - Cloud factor:
+    `cloud_factor = cloud_floor + (1 - cloud_floor) * (1 - cloud_cover_pct/100)^cloud_exp`
+  - Panel gain (fixed roof geometry):
+    - Uses timestamp, site latitude/longitude, panel tilt and panel azimuth to compute sun incidence angle.
+    - `panel_gain` scales with `max(0, cos(AOI))` and includes a diffuse floor (`FORECAST_PANEL_DIFFUSE_FLOOR`) so non-direct irradiance still contributes when sun angle is unfavorable.
+  - This keeps production possible under overcast conditions via `cloud_floor` (code default `0.25`; production `0.70`), meaning 100% cloud does not force PV forecast to zero.
+  - Uses data after cutoff `FORECAST_CUTOFF_TS` (default `2026-02-01 00:00:00+00`).
+  - Training window: `FORECAST_TRAIN_DAYS` (code default `120`; production `60`).
   - Uses bootstrap fallback when clean-history sample size is still small:
-    - `FORECAST_MIN_TRAIN_SAMPLES` (default `32`)
-    - `FORECAST_BOOTSTRAP_RATIO` (default `85`)
+    - `FORECAST_MIN_TRAIN_SAMPLES` (code default `32`; production `24`)
+    - `FORECAST_BOOTSTRAP_RATIO` (code default `85`; production `35`)
   - The run metadata records whether ratio came from `learned` history or `bootstrap` fallback.
 2. Forecast rule:
-  - If `fc_shortwave_radiation_w_m2 < FORECAST_MIN_RADIATION` (default `20 W/m2`): `yhat_p50 = 0`
-  - Otherwise: `yhat_p50 = ratio * fc_shortwave_radiation_w_m2`
+  - If `fc_shortwave_radiation_w_m2 < FORECAST_MIN_RADIATION` (code default `20 W/m2`; production `5 W/m2`): `yhat_p50 = 0`
+  - Otherwise: `yhat_p50 = ratio * effective_rad`
+  - Output is capped by `FORECAST_MAX_PV_W` (physical plant limit, e.g. `41900 W`).
 3. Production-window learning is disabled:
   - The model does not clamp prediction hours based on previous-day start/stop times.
   - This avoids seasonal lag bias (spring start too late, fall stop too late).
 4. Uncertainty bands are stored as `p10/p90`.
+  - Band width is cloud-aware (wider in high cloud scenarios).
 
 Important model assumption:
 - `fc_shortwave_radiation_w_m2` must represent instantaneous radiation (`RadiationGlobal`).
@@ -918,13 +929,36 @@ sudo /home/vuola/.kube-cron-jobs/update-cluster.sh
 kubectl -n weather get cronjob pv-forecast-15min
 ```
 
+Current tuned CronJob environment overrides (as of 2026-03-23):
+- `FORECAST_CUTOFF_TS=2026-02-01 00:00:00+00`
+- `FORECAST_TRAIN_DAYS=60`
+- `FORECAST_MIN_RADIATION=5`
+- `FORECAST_MIN_TRAIN_SAMPLES=24`
+- `FORECAST_BOOTSTRAP_RATIO=35`
+- `FORECAST_CLOUD_FLOOR=0.70`
+- `FORECAST_CLOUD_EXP=0.8`
+- `FORECAST_SITE_LAT=60.32128967082279`
+- `FORECAST_SITE_LON=24.87694349774082`
+- `FORECAST_PANEL_TILT_DEG=11`
+- `FORECAST_PANEL_AZIMUTH_DEG=90` (east-facing)
+- `FORECAST_PANEL_DIFFUSE_FLOOR=0.15`
+- `FORECAST_MIN_SOLAR_ELEVATION_DEG=-3`
+- `FORECAST_MAX_PV_W=41900`
+- `FORECAST_MODEL_NAME=pv_radiation_cloud_ratio`
+- `FORECAST_MODEL_VERSION=v3_aoi_roof_cap_tuned_20260323`
+
 ### Forecast vs actual UI
 
 A dedicated mobile-focused page is available:
 
 - `http://radxa-a.local/forecast.php`
 
-It shows latest run forecasts against measured `moxa_pv_feed_in_w` and includes a simple MAE indicator.
+It shows a full 24-hour grid (`96` x 15-minute slots) for the selected day and includes a simple MAE indicator.
+
+Page behavior:
+- Forecast values use the newest available run per target timestamp (not only a single latest run).
+- This keeps the daily view complete while actual `moxa_pv_feed_in_w` values fill in over time as measurements arrive.
+- Date switch options: `?date=today`, `?date=tomorrow`, or `?day=YYYY-MM-DD`.
 
 ### Manual test and troubleshooting
 

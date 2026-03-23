@@ -119,29 +119,54 @@ data:
     $latestRun = $runStmt->fetch(PDO::FETCH_ASSOC);
 
     $rows = [];
-    if ($latestRun) {
-      $stmt = $pdo->prepare(
-        "SELECT
+    $stmt = $pdo->prepare(
+      "WITH slots AS (
+         SELECT generate_series(
+           :start::timestamptz,
+           (:end::timestamptz - interval '15 minutes'),
+           interval '15 minutes'
+         ) AS target_ts
+       ),
+       best_forecast AS (
+         SELECT DISTINCT ON (fv.target_ts)
            fv.target_ts,
            fv.horizon_min,
            fv.yhat_p50,
            fv.yhat_p10,
            fv.yhat_p90,
-           wf.moxa_pv_feed_in_w AS actual_pv_feed_in_w
+           fr.run_id,
+           fr.model_name,
+           fr.model_version,
+           fr.issued_at
          FROM forecast_value fv
-         LEFT JOIN weather_fusion wf ON wf.ts = fv.target_ts
-         WHERE fv.run_id = :run_id
+         JOIN forecast_run fr ON fr.run_id = fv.run_id
+         WHERE fv.target = 'pv_feed_in_w'
+           AND fr.target = 'pv_feed_in_w'
            AND fv.target_ts >= :start
            AND fv.target_ts < :end
-         ORDER BY fv.target_ts ASC"
-      );
-      $stmt->execute([
-        ':run_id' => $latestRun['run_id'],
-        ':start' => $startUtc,
-        ':end' => $endUtc,
-      ]);
-      $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
-    }
+         ORDER BY fv.target_ts, fr.issued_at DESC, fr.run_id DESC
+       )
+       SELECT
+         s.target_ts,
+         bf.horizon_min,
+         bf.yhat_p50,
+         bf.yhat_p10,
+         bf.yhat_p90,
+         bf.run_id,
+         bf.model_name,
+         bf.model_version,
+         bf.issued_at,
+         wf.moxa_pv_feed_in_w AS actual_pv_feed_in_w
+       FROM slots s
+       LEFT JOIN best_forecast bf ON bf.target_ts = s.target_ts
+       LEFT JOIN weather_fusion wf ON wf.ts = s.target_ts
+       ORDER BY s.target_ts ASC"
+    );
+    $stmt->execute([
+      ':start' => $startUtc,
+      ':end' => $endUtc,
+    ]);
+    $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
     $errorCount = 0;
     $mae = 0.0;
@@ -197,14 +222,40 @@ data:
       exit;
     }
 
-    $issuedAtLocal = (new DateTimeImmutable($latestRun['issued_at']))->setTimezone($tz)->format('Y-m-d H:i');
-    echo "<p class=\"meta\">Model: <strong>" . htmlspecialchars((string)$latestRun['model_name']) . "</strong> " . htmlspecialchars((string)$latestRun['model_version']) . " | Run: " . htmlspecialchars((string)$latestRun['run_id']) . " | Issued: " . htmlspecialchars($issuedAtLocal) . "</p>";
+    $forecastPointCount = 0;
+    $runIdSet = [];
+    $modelSet = [];
+    $latestIssuedAt = null;
+    foreach ($rows as $row) {
+      if ($row['yhat_p50'] !== null) {
+        $forecastPointCount++;
+      }
+      if ($row['run_id'] !== null) {
+        $runIdSet[(string)$row['run_id']] = true;
+      }
+      if ($row['model_name'] !== null && $row['model_version'] !== null) {
+        $modelSet[(string)$row['model_name'] . ' ' . (string)$row['model_version']] = true;
+      }
+      if ($row['issued_at'] !== null) {
+        $ts = (new DateTimeImmutable((string)$row['issued_at']))->getTimestamp();
+        if ($latestIssuedAt === null || $ts > $latestIssuedAt) {
+          $latestIssuedAt = $ts;
+        }
+      }
+    }
+
+    $modelText = count($modelSet) > 0 ? implode(', ', array_keys($modelSet)) : ((string)$latestRun['model_name'] . ' ' . (string)$latestRun['model_version']);
+    $issuedAtText = $latestIssuedAt !== null
+      ? (new DateTimeImmutable('@' . (string)$latestIssuedAt))->setTimezone($tz)->format('Y-m-d H:i')
+      : (new DateTimeImmutable((string)$latestRun['issued_at']))->setTimezone($tz)->format('Y-m-d H:i');
+
+    echo "<p class=\"meta\">Model(s): <strong>" . htmlspecialchars($modelText) . "</strong> | Runs used: " . count($runIdSet) . " | Newest issue time: " . htmlspecialchars($issuedAtText) . "</p>";
     if (!empty($latestRun['notes'])) {
       echo "<p class=\"meta\">" . htmlspecialchars((string)$latestRun['notes']) . "</p>";
     }
 
     echo "<div class=\"kpi\">";
-    echo "<div class=\"item\"><div class=\"label\">Points in selected day</div><div class=\"value\">" . count($rows) . "</div></div>";
+    echo "<div class=\"item\"><div class=\"label\">Forecast points in selected day</div><div class=\"value\">" . $forecastPointCount . " / " . count($rows) . "</div></div>";
     echo "<div class=\"item\"><div class=\"label\">MAE (where actual exists)</div><div class=\"value\">" . htmlspecialchars($maeText) . "</div></div>";
     echo "</div>";
     echo "</div>";

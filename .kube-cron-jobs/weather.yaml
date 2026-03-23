@@ -823,21 +823,39 @@ spec:
                       name: weather-db
                       key: MYSQL_PASSWORD
                 - name: FORECAST_CUTOFF_TS
-                  value: "2026-03-23 06:19:00+00"
+                  value: "2026-02-01 00:00:00+00"
                 - name: FORECAST_HORIZON_HOURS
                   value: "24"
                 - name: FORECAST_TRAIN_DAYS
-                  value: "30"
+                  value: "60"
                 - name: FORECAST_MIN_RADIATION
-                  value: "20"
+                  value: "5"
                 - name: FORECAST_BOOTSTRAP_RATIO
-                  value: "85"
+                  value: "35"
                 - name: FORECAST_MIN_TRAIN_SAMPLES
-                  value: "32"
+                  value: "24"
+                - name: FORECAST_CLOUD_FLOOR
+                  value: "0.70"
+                - name: FORECAST_CLOUD_EXP
+                  value: "0.8"
+                - name: FORECAST_SITE_LAT
+                  value: "60.32128967082279"
+                - name: FORECAST_SITE_LON
+                  value: "24.87694349774082"
+                - name: FORECAST_PANEL_TILT_DEG
+                  value: "11"
+                - name: FORECAST_PANEL_AZIMUTH_DEG
+                  value: "90"
+                - name: FORECAST_PANEL_DIFFUSE_FLOOR
+                  value: "0.15"
+                - name: FORECAST_MIN_SOLAR_ELEVATION_DEG
+                  value: "-3"
+                - name: FORECAST_MAX_PV_W
+                  value: "41900"
                 - name: FORECAST_MODEL_NAME
-                  value: "pv_radiation_ratio"
+                  value: "pv_radiation_cloud_ratio"
                 - name: FORECAST_MODEL_VERSION
-                  value: "v4_bootstrap_clean_cutoff"
+                  value: "v3_aoi_roof_cap_tuned_20260323"
               command:
                 - /bin/bash
                 - -c
