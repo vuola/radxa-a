@@ -118,3 +118,45 @@ The holistic forecasting milestone is complete when:
 - Keep the current PV baseline operational while adding new targets.
 - Prefer incremental deployment and validation (one phase at a time).
 - Preserve backward compatibility in DB queries and UI where possible.
+
+## Deferred Plan: Fixed Nonlinear PV Output Response
+
+Status:
+- Planned only. No changes to running code at this moment.
+- Implementation starts on a clear-sky day so parameters can be tuned against same-day measurements.
+
+Objective:
+- Replace the final linear PV mapping (`yhat = ratio * effective_rad`) with a fixed nonlinear response from effective radiation to output power.
+- Keep the model deterministic and operationally simple after tuning.
+
+Planned model form:
+- `G = effective_rad`
+- `P = P_MAX * (1 - exp(-k * max(G - G0, 0)))^gamma`
+- `P = min(P, P_MAX)`
+
+Where:
+- `G0`: low-radiation deadband (W/m2)
+- `k`: rise-rate parameter
+- `gamma`: curvature/shape parameter
+- `P_MAX`: plant/inverter cap (W)
+
+Implementation scope (when clear day is available):
+1. Add a runtime switch for nonlinear mapping (`FORECAST_USE_NONLINEAR=1`) while keeping current linear path as fallback.
+2. Add nonlinear parameters as env overrides (`FORECAST_NL_G0`, `FORECAST_NL_K`, `FORECAST_NL_GAMMA`, reuse `FORECAST_MAX_PV_W`).
+3. Keep existing effective-radiation pipeline unchanged (cloud factor + panel gain + safety caps).
+4. Write run metadata and notes so nonlinear-vs-linear comparisons are traceable.
+
+Same-day clear-sky tuning plan:
+1. Start from conservative defaults and run forecasts through a full clear-day ramp (morning to afternoon peak).
+2. Tune in order:
+   - `G0` to set near-zero production threshold
+   - `k` to match ramp speed
+   - `gamma` to match shoulder and peak curvature
+3. Validate midday peak alignment against measured `moxa_pv_feed_in_w`.
+4. Confirm no non-physical night output and cap behavior near `P_MAX`.
+
+Acceptance criteria:
+- Midday overprediction is materially reduced on the tuning day and remains improved on subsequent days.
+- Full-day MAE does not regress versus current baseline.
+- Forecast output remains physically plausible (no night leakage, no cap overshoot).
+- Rollback path remains available by switching nonlinear mode off.
