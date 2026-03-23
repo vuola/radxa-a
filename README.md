@@ -263,7 +263,7 @@ The web interface displays a curated selection of 13 columns from the 22-column 
 7. **FC_Dir** - Forecast wind direction (degrees) from FMI
 8. **Moxa_Dir** - Measured wind direction (degrees) from moxa.local
 9. **FC_Cloud** - Forecast cloud cover (%) from FMI
-10. **FC_Rad** - Forecast solar radiation (W/m²) from FMI
+10. **FC_Rad** - Forecast solar radiation (W/m2) from FMI `RadiationGlobal` (instantaneous)
 11. **PV_Feed** - PV system feed-in power (W) from moxa.local
 12. **Active_Power** - Active power at point of common coupling (W) from moxa.local
 13. **Battery_SOC** - Battery state of charge (%) from moxa.local
@@ -588,7 +588,12 @@ The `weather_fusion` view now combines moxa instant weather data with FMI foreca
 - `fc_wind_speed_ms` — Interpolated FMI forecast wind speed
 - `fc_wind_direction_deg` — Interpolated FMI forecast wind direction
 - `fc_cloud_cover_pct` — Interpolated FMI forecast cloud cover
-- `fc_shortwave_radiation_w_m2` — Interpolated FMI forecast radiation
+- `fc_shortwave_radiation_w_m2` — Interpolated FMI forecast radiation from `RadiationGlobal` (instantaneous W/m2)
+
+Radiation parameter note:
+- The importer uses FMI `RadiationGlobal` as the default source for `shortwave_radiation_w_m2`.
+- `RadiationGlobalAccumulation` is cumulative (day-integrated style) and must not be used as the primary PV forecast driver.
+- Accumulation fallback is disabled by default and can be enabled only with `FMI_ALLOW_ACCUMULATION_FALLBACK=1`.
 
 **Moxa instant weather columns** (no prefix, at 15-minute boundaries):
 - Temperature, dew point, humidity, pressure, wind speed, wind direction, precipitation
@@ -860,17 +865,24 @@ Current model is a robust baseline:
 
 1. Fit a radiation-to-PV ratio from recent history:
   - Uses `fc_shortwave_radiation_w_m2` and measured `moxa_pv_feed_in_w`
-  - Uses data after cutoff `FORECAST_CUTOFF_TS` (default `2026-03-06 17:45:00+00`)
-2. Learn adaptive active production window from real PV behavior:
-  - For each recent day, detect first and last local times when `pv_feed_in_w >= FORECAST_PV_ACTIVE_THRESHOLD_W` (default `100 W`)
-  - Use median start/stop across valid days as current production window
-3. Forecast rule:
-  - Outside active window: `yhat_p50 = 0`
-  - Inside window and with low radiation (`< FORECAST_MIN_RADIATION`, default `20 W/m2`): `yhat_p50 = 0`
+  - Uses data after cutoff `FORECAST_CUTOFF_TS` (current default `2026-03-23 06:19:00+00`, i.e. post radiation-fix window)
+  - Uses bootstrap fallback when clean-history sample size is still small:
+    - `FORECAST_MIN_TRAIN_SAMPLES` (default `32`)
+    - `FORECAST_BOOTSTRAP_RATIO` (default `85`)
+  - The run metadata records whether ratio came from `learned` history or `bootstrap` fallback.
+2. Forecast rule:
+  - If `fc_shortwave_radiation_w_m2 < FORECAST_MIN_RADIATION` (default `20 W/m2`): `yhat_p50 = 0`
   - Otherwise: `yhat_p50 = ratio * fc_shortwave_radiation_w_m2`
+3. Production-window learning is disabled:
+  - The model does not clamp prediction hours based on previous-day start/stop times.
+  - This avoids seasonal lag bias (spring start too late, fall stop too late).
 4. Uncertainty bands are stored as `p10/p90`.
 
-This adaptive window accounts for real-world delays between sunrise/sunset and actual inverter production/idle behavior.
+Important model assumption:
+- `fc_shortwave_radiation_w_m2` must represent instantaneous radiation (`RadiationGlobal`).
+- Using cumulative accumulation fields as the baseline feature creates a systemic forecast bias.
+
+The no-window baseline adapts through radiation level and ratio fit, without historical hour clamping.
 
 ### Storage tables
 

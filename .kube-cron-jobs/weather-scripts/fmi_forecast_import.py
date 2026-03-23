@@ -4,8 +4,7 @@ import requests
 import psycopg2
 from psycopg2.extras import execute_batch
 from lxml import etree
-from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
+from datetime import datetime
 
 print("Starting FMI forecast import", file=sys.stderr, flush=True)
 
@@ -35,7 +34,7 @@ ns = {
     "gml": "http://www.opengis.net/gml/3.2",
 }
 
-tz_utc = timezone.utc
+allow_accumulation_fallback = os.environ.get("FMI_ALLOW_ACCUMULATION_FALLBACK", "0") == "1"
 
 try:
     pg_conn = psycopg2.connect(
@@ -104,11 +103,14 @@ for ts_key, data in data_by_param_ts.items():
     wind_speed = data.get("WindSpeedMS")
     wind_dir = data.get("WindDirection")
     cloud = data.get("TotalCloudCover")
-    radiation_j_m2 = data.get("RadiationGlobalAccumulation") or data.get("RadiationLWAccumulation")
-    
-    # Convert accumulated energy (J/m² over 1 hour) to instantaneous power (W/m²)
-    # 1 W = 1 J/s, so J/m² accumulated over 3600 seconds → divide by 3600
-    radiation_w_m2 = radiation_j_m2 / 3600.0 if radiation_j_m2 is not None else None
+    # FMI `RadiationGlobal` is the instantaneous shortwave radiation forecast (W/m²).
+    radiation_w_m2 = data.get("RadiationGlobal")
+
+    # Optional compatibility mode for feeds where only accumulation is available.
+    # Disabled by default because accumulation-style series can bias PV models.
+    if radiation_w_m2 is None and allow_accumulation_fallback:
+        radiation_j_m2 = data.get("RadiationGlobalAccumulation") or data.get("RadiationSWAccumulation")
+        radiation_w_m2 = radiation_j_m2 / 3600.0 if radiation_j_m2 is not None else None
 
     rows.append((dt.isoformat(), temp, wind_speed, wind_dir, cloud, radiation_w_m2))
 

@@ -823,21 +823,21 @@ spec:
                       name: weather-db
                       key: MYSQL_PASSWORD
                 - name: FORECAST_CUTOFF_TS
-                  value: "2026-03-06 17:45:00+00"
+                  value: "2026-03-23 06:19:00+00"
                 - name: FORECAST_HORIZON_HOURS
                   value: "24"
                 - name: FORECAST_TRAIN_DAYS
                   value: "30"
                 - name: FORECAST_MIN_RADIATION
                   value: "20"
-                - name: FORECAST_PV_ACTIVE_THRESHOLD_W
-                  value: "100"
-                - name: FORECAST_LOCAL_TZ
-                  value: "Europe/Helsinki"
+                - name: FORECAST_BOOTSTRAP_RATIO
+                  value: "85"
+                - name: FORECAST_MIN_TRAIN_SAMPLES
+                  value: "32"
                 - name: FORECAST_MODEL_NAME
                   value: "pv_radiation_ratio"
                 - name: FORECAST_MODEL_VERSION
-                  value: "v2_windowed"
+                  value: "v4_bootstrap_clean_cutoff"
               command:
                 - /bin/bash
                 - -c

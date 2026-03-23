@@ -22,8 +22,8 @@ def main() -> int:
     horizon_hours = int(read_env("FORECAST_HORIZON_HOURS", "24"))
     train_days = int(read_env("FORECAST_TRAIN_DAYS", "30"))
     min_radiation = float(read_env("FORECAST_MIN_RADIATION", "20"))
-    active_pv_threshold_w = float(read_env("FORECAST_PV_ACTIVE_THRESHOLD_W", "100"))
-    local_tz = read_env("FORECAST_LOCAL_TZ", "Europe/Helsinki")
+    bootstrap_ratio = float(read_env("FORECAST_BOOTSTRAP_RATIO", "85"))
+    min_train_samples = int(read_env("FORECAST_MIN_TRAIN_SAMPLES", "32"))
     model_name = read_env("FORECAST_MODEL_NAME", "pv_radiation_ratio")
     model_version = read_env("FORECAST_MODEL_VERSION", "v1")
 
@@ -92,48 +92,13 @@ def main() -> int:
                 )
                 ratio, sample_count = cur.fetchone()
 
-                cur.execute(
-                    """
-                    WITH daily AS (
-                      SELECT
-                        (ts AT TIME ZONE %s)::date AS d,
-                        MIN(EXTRACT(EPOCH FROM (ts AT TIME ZONE %s)::time))
-                          FILTER (WHERE pv_feed_in_w >= %s) AS start_sec,
-                        MAX(EXTRACT(EPOCH FROM (ts AT TIME ZONE %s)::time))
-                          FILTER (WHERE pv_feed_in_w >= %s) AS stop_sec
-                      FROM moxa_weather_15min
-                      WHERE ts >= %s::timestamptz
-                        AND ts >= now() - (%s || ' days')::interval
-                      GROUP BY 1
-                    ), valid AS (
-                      SELECT * FROM daily WHERE start_sec IS NOT NULL AND stop_sec IS NOT NULL
-                    )
-                    SELECT
-                      percentile_cont(0.5) WITHIN GROUP (ORDER BY start_sec) AS start_sec_median,
-                      percentile_cont(0.5) WITHIN GROUP (ORDER BY stop_sec) AS stop_sec_median,
-                      COUNT(*) AS valid_days
-                    FROM valid;
-                    """,
-                    (
-                        local_tz,
-                        local_tz,
-                        active_pv_threshold_w,
-                        local_tz,
-                        active_pv_threshold_w,
-                        cutoff_ts,
-                        str(train_days),
-                    ),
-                )
-                start_sec_median, stop_sec_median, valid_days = cur.fetchone()
-
-                if start_sec_median is None or stop_sec_median is None:
-                    start_sec_median = 0
-                    stop_sec_median = 24 * 3600 - 1
-
-                # Keep coefficient in a sane range for first-pass production estimates.
-                ratio = float(max(0.0, min(20.0, ratio or 0.0)))
-                window_start_sec = int(start_sec_median)
-                window_stop_sec = int(stop_sec_median)
+                learned_ratio = float(max(0.0, ratio or 0.0))
+                if sample_count < min_train_samples or learned_ratio <= 0.0:
+                    ratio_used = float(max(0.0, bootstrap_ratio))
+                    ratio_source = "bootstrap"
+                else:
+                    ratio_used = learned_ratio
+                    ratio_source = "learned"
 
                 cur.execute(
                     """
@@ -155,10 +120,10 @@ def main() -> int:
                         cutoff_ts,
                         issue_ts,
                         (
-                            f"ratio={ratio:.6f}, samples={sample_count}, train_days={train_days}, "
-                            f"window={window_start_sec//3600:02d}:{(window_start_sec%3600)//60:02d}-"
-                            f"{window_stop_sec//3600:02d}:{(window_stop_sec%3600)//60:02d} {local_tz}, "
-                            f"active_days={valid_days}, active_threshold_w={active_pv_threshold_w:.0f}"
+                            f"ratio_used={ratio_used:.6f}, ratio_learned={learned_ratio:.6f}, "
+                            f"ratio_source={ratio_source}, samples={sample_count}, "
+                            f"min_train_samples={min_train_samples}, train_days={train_days}, "
+                            f"windowing=disabled, min_radiation={min_radiation:.1f}"
                         ),
                     ),
                 )
@@ -168,14 +133,13 @@ def main() -> int:
                     """
                     SELECT
                       ts,
-                      fc_shortwave_radiation_w_m2,
-                      EXTRACT(EPOCH FROM (ts AT TIME ZONE %s)::time)::int AS local_sec
+                      fc_shortwave_radiation_w_m2
                     FROM weather_fusion
                     WHERE ts >= %s
                       AND ts < %s
                     ORDER BY ts ASC;
                     """,
-                    (local_tz, issue_ts, end_ts),
+                    (issue_ts, end_ts),
                 )
                 rows = cur.fetchall()
 
@@ -184,11 +148,10 @@ def main() -> int:
                     return 1
 
                 payload = []
-                for ts, radiation, local_sec in rows:
+                for ts, radiation in rows:
                     radiation_val = float(radiation or 0.0)
-                    in_window = window_start_sec <= int(local_sec) <= window_stop_sec
-                    if in_window and radiation_val >= min_radiation:
-                        yhat = max(0.0, ratio * radiation_val)
+                    if radiation_val >= min_radiation:
+                        yhat = max(0.0, ratio_used * radiation_val)
                     else:
                         yhat = 0.0
                     band = max(150.0, 0.2 * yhat)
@@ -216,7 +179,7 @@ def main() -> int:
                 )
 
         print(
-            f"Forecast run {run_id} created with {len(payload)} points (ratio={ratio:.6f}, samples={sample_count})",
+            f"Forecast run {run_id} created with {len(payload)} points (ratio_used={ratio_used:.6f}, learned={learned_ratio:.6f}, source={ratio_source}, samples={sample_count})",
             file=sys.stderr,
             flush=True,
         )
