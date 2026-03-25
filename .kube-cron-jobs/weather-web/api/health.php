@@ -112,32 +112,43 @@ try {
   ];
 }
 
-// 5. Backup validity
-$backup_dir = '/media/ssd250/weather/backups';
-$backup_files = glob($backup_dir . '/weather_*.sql');
-if ($backup_files) {
-  usort($backup_files, function($a, $b) { return filemtime($b) - filemtime($a); });
-  $latest = $backup_files[0];
-  $age_hours = (time() - filemtime($latest)) / 3600;
-  $size_kb = filesize($latest) / 1024;
-  
-  if ($age_hours > 26 || $size_kb < 100) {
+// 5. Backup validity (cross-node safe: read metadata from DB)
+try {
+  $stmt = $pdo->query("SELECT EXTRACT(EPOCH FROM (now() - run_ts))/3600 AS age_hours, dump_size_bytes
+    FROM backup_runs
+    WHERE status = 'success'
+    ORDER BY run_ts DESC
+    LIMIT 1");
+  $row = $stmt->fetch(PDO::FETCH_ASSOC);
+
+  if ($row) {
+    $age_hours = (float)$row['age_hours'];
+    $size_kb = ((float)$row['dump_size_bytes']) / 1024;
+    if ($age_hours > 26 || $size_kb < 100) {
+      $result['overall_status'] = 'error';
+      $msg = [];
+      if ($age_hours > 26) $msg[] = sprintf('%.1fh old', $age_hours);
+      if ($size_kb < 100) $msg[] = sprintf('only %.0fKB', $size_kb);
+      $result['failures'][] = [
+        'check' => 'backup',
+        'status' => 'error',
+        'message' => 'Backup invalid: ' . implode(', ', $msg)
+      ];
+    }
+  } else {
     $result['overall_status'] = 'error';
-    $msg = [];
-    if ($age_hours > 26) $msg[] = sprintf('%.1fh old', $age_hours);
-    if ($size_kb < 100) $msg[] = sprintf('only %.0fKB', $size_kb);
     $result['failures'][] = [
       'check' => 'backup',
       'status' => 'error',
-      'message' => 'Backup invalid: ' . implode(', ', $msg)
+      'message' => 'No successful backup metadata found'
     ];
   }
-} else {
+} catch (Throwable $e) {
   $result['overall_status'] = 'error';
   $result['failures'][] = [
     'check' => 'backup',
     'status' => 'error',
-    'message' => 'No backup files found'
+    'message' => 'Failed to check backup metadata'
   ];
 }
 

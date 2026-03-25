@@ -175,6 +175,17 @@ spec:
                   dump_size=$(stat -c %s "$dump_file" 2>/dev/null || echo 0)
                   if [ "$dump_size" -lt 102400 ]; then
                     echo "ERROR: Dump file is too small (${dump_size} bytes). Minimum expected: 100KB" >&2
+                    psql -h weather-postgres -U "$POSTGRES_USER" "$POSTGRES_DB" -v ON_ERROR_STOP=1 -c "
+                      CREATE TABLE IF NOT EXISTS backup_runs (
+                        id BIGSERIAL PRIMARY KEY,
+                        run_ts TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        dump_path TEXT NOT NULL,
+                        dump_size_bytes BIGINT NOT NULL,
+                        status TEXT NOT NULL,
+                        error_message TEXT
+                      );"
+                    psql -h weather-postgres -U "$POSTGRES_USER" "$POSTGRES_DB" -v ON_ERROR_STOP=1 -c \
+                      "INSERT INTO backup_runs (dump_path, dump_size_bytes, status, error_message) VALUES ('${dump_file}', ${dump_size}, 'failed', 'dump too small');"
                     rm -f "$dump_file"
                     exit 1
                   fi
@@ -184,13 +195,26 @@ spec:
                   # Retention: keep latest 7 valid dumps, remove zero-byte/failed dumps immediately
                   find /backups -name 'weather_*.sql' -type f -size 0 -delete
                   ls -1t /backups/weather_*.sql | tail -n +8 | xargs -r rm -f
+
+                  # Persist backup metadata in PostgreSQL so health checks work across nodes.
+                  psql -h weather-postgres -U "$POSTGRES_USER" "$POSTGRES_DB" -v ON_ERROR_STOP=1 -c "
+                    CREATE TABLE IF NOT EXISTS backup_runs (
+                      id BIGSERIAL PRIMARY KEY,
+                      run_ts TIMESTAMPTZ NOT NULL DEFAULT now(),
+                      dump_path TEXT NOT NULL,
+                      dump_size_bytes BIGINT NOT NULL,
+                      status TEXT NOT NULL,
+                      error_message TEXT
+                    );"
+                  psql -h weather-postgres -U "$POSTGRES_USER" "$POSTGRES_DB" -v ON_ERROR_STOP=1 -c \
+                    "INSERT INTO backup_runs (dump_path, dump_size_bytes, status) VALUES ('${dump_file}', ${dump_size}, 'success');"
               volumeMounts:
                 - name: backups
                   mountPath: /backups
           volumes:
             - name: backups
               hostPath:
-                path: /media/ssd250/weather/backups
+                path: /media/ssd1000/weather/backups
                 type: DirectoryOrCreate
 ---
 apiVersion: batch/v1
@@ -205,7 +229,7 @@ spec:
       template:
         spec:
           nodeSelector:
-            kubernetes.io/hostname: radxa-b
+            kubernetes.io/hostname: radxa-a
           restartPolicy: OnFailure
           containers:
             - name: importer

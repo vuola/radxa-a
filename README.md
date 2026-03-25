@@ -33,7 +33,7 @@ This repository documents the weather archive stack running on radxa-a.local and
 - **radxa-a.local** runs a k3s cluster that hosts:
   - PostgreSQL for weather data (persisted to the SSD at /media/ssd250)
   - NGINX + PHP for a simple web UI and ingest endpoint
-  - Daily DB backups to /media/ssd250/weather/backups
+  - Daily DB backups written to radxa-b SSD at /media/ssd1000/weather/backups
 - **moxa.local** keeps the live SQLite database and uploads an online backup once per day.
 - **Backup retention**: keep the **latest 7 dumps** via retention-based rotation to balance disk usage and safety.
 
@@ -46,11 +46,11 @@ The weather stack runs on a dual-node k3s cluster for improved performance and p
 - **radxa-a** (192.168.68.111): Kubernetes control plane + worker node
   - Hosts stateful services (PostgreSQL database)
   - Stores data on local SSD: `/media/ssd250/weather/`
-  - Runs storage-coupled CronJobs (backups, parquet exports)
+  - Runs storage-coupled CronJobs requiring local radxa-a storage (parquet exports, SQLite inbox import)
 - **radxa-b** (192.168.68.128): Kubernetes agent/worker node
   - Runs stateless workloads (API calls, data imports, forecasting)
   - Offloads compute-heavy jobs from the control plane
-  - No persistent storage (ephemeral pod volumes only)
+  - Hosts dedicated backup SSD mount: `/media/ssd1000/weather/backups`
 
 ### Workload distribution
 
@@ -60,7 +60,7 @@ Workloads are scheduled using `nodeSelector: kubernetes.io/hostname: <node-name>
 |----------|------|--------|
 | PostgreSQL StatefulSet | radxa-a | Database must access `/media/ssd250/weather/postgres` |
 | Web server (NGINX + PHP) | radxa-a | Serves weather data and health API |
-| Backup CronJob | radxa-a | Writes backups to local SSD |
+| Backup CronJob | radxa-b | Writes backups to dedicated backup SSD (`/media/ssd1000/weather/backups`) |
 | SQLite import | radxa-a | Imports uploaded backups into PostgreSQL |
 | Parquet export | radxa-a | Writes Parquet files to `/media/ssd250/weather/exports/` |
 | FMI forecast import | radxa-b | Stateless API call to FMI service |
@@ -178,8 +178,8 @@ kubectl -n weather exec statefulset/weather-postgres -- psql -U weather -d weath
 
 **Backup management**:
 ```bash
-# List backups
-ls -lh /media/ssd250/weather/backups/
+# List backups (on radxa-b.local)
+ls -lh /media/ssd1000/weather/backups/
 
 # Manually trigger backup
 kubectl -n weather create job --from=cronjob/weather-postgres-backup manual-backup-$(date +%s)
@@ -241,8 +241,11 @@ Deployed in namespace `weather`:
 ### Storage paths (radxa-a.local)
 
 - PostgreSQL data: /media/ssd250/weather/postgres
-- Backups: /media/ssd250/weather/backups
 - Upload inbox: /media/ssd250/weather/inbox
+
+### Storage paths (radxa-b.local)
+
+- Backups: /media/ssd1000/weather/backups
 
 ### Script locations (radxa-a.local)
 
@@ -290,7 +293,7 @@ Returns JSON with overall system status and any failing checks:
    - >60 minutes: ERROR (import likely failing)
 3. **FMI forecast horizon** — Forecast covers at least +6 hours ahead
 4. **ENTSOE prices coverage** — Today's price data present
-5. **Backup validity** — Latest backup:
+5. **Backup validity** — Latest successful backup run (from PostgreSQL `backup_runs` metadata):
    - Age ≤26 hours (nightly backup at 02:15)
    - File size ≥100KB (validates against zero-byte dumps)
 6. **Parquet export freshness** — Latest export age ≤30 minutes
@@ -316,7 +319,7 @@ curl -s http://radxa-a.local/api/health.php | jq '.failures[]'
 **Troubleshooting common failures**:
 
 - **Moxa data stale**: Check moxa.local is reachable and `moxa-weather-15min-import` CronJob is running
-- **Backup failed**: Check `/media/ssd250/weather/backups/` for recent dumps, view backup CronJob logs
+- **Backup failed**: Check `backup_runs` metadata and backup CronJob logs; verify files on `radxa-b:/media/ssd1000/weather/backups/`
 - **FMI forecast stale**: Check `fmi-forecast-import` CronJob logs, verify FMI API is accessible
 - **ENTSOE prices missing**: Check ENTSO-E API key secret, verify `entsoe-dayahead-import` ran successfully
 

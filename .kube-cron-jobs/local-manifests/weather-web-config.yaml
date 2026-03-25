@@ -347,18 +347,22 @@ data:
     today (%d/96 rows)', $today_count)\n    ];\n  }\n} catch (Throwable $e) {\n  $result['overall_status']
     = 'error';\n  $result['failures'][] = [\n    'check' => 'entsoe_prices',\n    'status'
     => 'error',\n    'message' => 'Failed to check entsoe_prices'\n  ];\n}\n\n// 5.
-    Backup validity\n$backup_dir = '/media/ssd250/weather/backups';\n$backup_files
-    = glob($backup_dir . '/weather_*.sql');\nif ($backup_files) {\n  usort($backup_files,
-    function($a, $b) { return filemtime($b) - filemtime($a); });\n  $latest = $backup_files[0];\n
-    \ $age_hours = (time() - filemtime($latest)) / 3600;\n  $size_kb = filesize($latest)
-    / 1024;\n  \n  if ($age_hours > 26 || $size_kb < 100) {\n    $result['overall_status']
-    = 'error';\n    $msg = [];\n    if ($age_hours > 26) $msg[] = sprintf('%.1fh old',
-    $age_hours);\n    if ($size_kb < 100) $msg[] = sprintf('only %.0fKB', $size_kb);\n
-    \   $result['failures'][] = [\n      'check' => 'backup',\n      'status' => 'error',\n
-    \     'message' => 'Backup invalid: ' . implode(', ', $msg)\n    ];\n  }\n} else
-    {\n  $result['overall_status'] = 'error';\n  $result['failures'][] = [\n    'check'
-    => 'backup',\n    'status' => 'error',\n    'message' => 'No backup files found'\n
-    \ ];\n}\n\n// 6. Parquet freshness\n$parquet_dir = '/media/ssd250/weather/exports';\n$parquet_files
+    Backup validity (cross-node safe: read metadata from DB)\ntry {\n  $stmt = $pdo->query(\"SELECT
+    EXTRACT(EPOCH FROM (now() - run_ts))/3600 AS age_hours, dump_size_bytes\n    FROM
+    backup_runs\n    WHERE status = 'success'\n    ORDER BY run_ts DESC\n    LIMIT
+    1\");\n  $row = $stmt->fetch(PDO::FETCH_ASSOC);\n\n  if ($row) {\n    $age_hours
+    = (float)$row['age_hours'];\n    $size_kb = ((float)$row['dump_size_bytes']) /
+    1024;\n    if ($age_hours > 26 || $size_kb < 100) {\n      $result['overall_status']
+    = 'error';\n      $msg = [];\n      if ($age_hours > 26) $msg[] = sprintf('%.1fh
+    old', $age_hours);\n      if ($size_kb < 100) $msg[] = sprintf('only %.0fKB',
+    $size_kb);\n      $result['failures'][] = [\n        'check' => 'backup',\n        'status'
+    => 'error',\n        'message' => 'Backup invalid: ' . implode(', ', $msg)\n      ];\n
+    \   }\n  } else {\n    $result['overall_status'] = 'error';\n    $result['failures'][]
+    = [\n      'check' => 'backup',\n      'status' => 'error',\n      'message' =>
+    'No successful backup metadata found'\n    ];\n  }\n} catch (Throwable $e) {\n
+    \ $result['overall_status'] = 'error';\n  $result['failures'][] = [\n    'check'
+    => 'backup',\n    'status' => 'error',\n    'message' => 'Failed to check backup
+    metadata'\n  ];\n}\n\n// 6. Parquet freshness\n$parquet_dir = '/media/ssd250/weather/exports';\n$parquet_files
     = glob($parquet_dir . '/weather_fusion_*.parquet');\nif ($parquet_files) {\n  usort($parquet_files,
     function($a, $b) { return filemtime($b) - filemtime($a); });\n  $latest = $parquet_files[0];\n
     \ $age_min = (time() - filemtime($latest)) / 60;\n  \n  if ($age_min > 30) {\n
