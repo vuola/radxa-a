@@ -97,6 +97,13 @@ spec:
           ports:
             - containerPort: 5432
               name: postgres
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"         
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql/data
@@ -128,8 +135,12 @@ metadata:
   namespace: weather
 spec:
   schedule: "15 2 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2
   jobTemplate:
     spec:
+      ttlSecondsAfterFinished: 1800
       template:
         spec:
           restartPolicy: OnFailure
@@ -208,6 +219,13 @@ spec:
                     );"
                   psql -h weather-postgres -U "$POSTGRES_USER" "$POSTGRES_DB" -v ON_ERROR_STOP=1 -c \
                     "INSERT INTO backup_runs (dump_path, dump_size_bytes, status) VALUES ('${dump_file}', ${dump_size}, 'success');"
+              resources:
+                requests:
+                  cpu: "50m"
+                  memory: "128Mi"
+                limits:
+                  cpu: "300m"
+                  memory: "384Mi"
               volumeMounts:
                 - name: backups
                   mountPath: /backups
@@ -224,8 +242,12 @@ metadata:
   namespace: weather
 spec:
   schedule: "10 0 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2
   jobTemplate:
     spec:
+      ttlSecondsAfterFinished: 1800
       template:
         spec:
           nodeSelector:
@@ -262,6 +284,13 @@ spec:
                   set -e
                   python -m pip install --no-cache-dir psycopg2-binary
                   python /opt/sqlite/sqlite_import.py
+              resources:
+                requests:
+                  cpu: "50m"
+                  memory: "128Mi"
+                limits:
+                  cpu: "300m"
+                  memory: "384Mi"
               volumeMounts:
                 - name: inbox
                   mountPath: /var/inbox
@@ -284,10 +313,16 @@ metadata:
   namespace: weather
 spec:
   schedule: "10 14,15,16 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2
   jobTemplate:
     spec:
+      ttlSecondsAfterFinished: 1800
       template:
         spec:
+          nodeSelector:
+            kubernetes.io/hostname: radxa-b
           restartPolicy: OnFailure
           containers:
             - name: entsoe-importer
@@ -332,6 +367,13 @@ spec:
                   set -e
                   python -m pip install --no-cache-dir psycopg2-binary requests
                   python /opt/entsoe/entsoe_import.py
+              resources:
+                requests:
+                  cpu: "50m"
+                  memory: "128Mi"
+                limits:
+                  cpu: "300m"
+                  memory: "384Mi"
               volumeMounts:
                 - name: entsoe-importer-script
                   mountPath: /opt/entsoe/entsoe_import.py
@@ -349,10 +391,16 @@ metadata:
   namespace: weather
 spec:
   schedule: "*/15 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2
   jobTemplate:
     spec:
+      ttlSecondsAfterFinished: 1800
       template:
         spec:
+          nodeSelector:
+            kubernetes.io/hostname: radxa-b
           restartPolicy: OnFailure
           containers:
             - name: view-creator
@@ -428,6 +476,13 @@ spec:
                   LEFT JOIN moxa_weather_15min m ON e.ts = m.ts
                   ORDER BY e.ts;
                   "
+              resources:
+                requests:
+                  cpu: "50m"
+                  memory: "128Mi"
+                limits:
+                  cpu: "300m"
+                  memory: "384Mi"
 ---
 apiVersion: batch/v1
 kind: CronJob
@@ -436,10 +491,16 @@ metadata:
   namespace: weather
 spec:
   schedule: "5 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2
   jobTemplate:
     spec:
+      ttlSecondsAfterFinished: 1800
       template:
         spec:
+          nodeSelector:
+            kubernetes.io/hostname: radxa-b
           restartPolicy: OnFailure
           containers:
             - name: fmi-importer
@@ -475,6 +536,13 @@ spec:
                   set -e
                   python -m pip install --no-cache-dir psycopg2-binary requests lxml
                   python /opt/fmi/fmi_forecast_import.py
+              resources:
+                requests:
+                  cpu: "50m"
+                  memory: "128Mi"
+                limits:
+                  cpu: "300m"
+                  memory: "384Mi"
               volumeMounts:
                 - name: fmi-importer-script
                   mountPath: /opt/fmi/fmi_forecast_import.py
@@ -501,7 +569,8 @@ spec:
       labels:
         app: weather-web
     spec:
-
+      nodeSelector:
+        kubernetes.io/hostname: radxa-a
       initContainers:
         - name: inbox-permissions
           image: docker.io/library/busybox:1.36
@@ -514,6 +583,13 @@ spec:
               mkdir -p /var/inbox
               chown 1:1 /var/inbox
               chmod 775 /var/inbox
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "16Mi"
+            limits:
+              cpu: "50m"
+              memory: "32Mi"
           volumeMounts:
             - name: inbox
               mountPath: /var/inbox
@@ -524,6 +600,13 @@ spec:
           ports:
             - containerPort: 8080
               name: http
+          resources:
+            requests:
+              cpu: "25m"
+              memory: "32Mi"
+            limits:
+              cpu: "100m"
+              memory: "64Mi"
           volumeMounts:
             - name: web-config
               mountPath: /etc/nginx/conf.d/default.conf
@@ -560,6 +643,13 @@ spec:
           ports:
             - containerPort: 9000
               name: fastcgi
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "384Mi"              
           volumeMounts:
             - name: web-app
               mountPath: /app
@@ -733,6 +823,13 @@ spec:
           image: eclipse-mosquitto:2
           ports:
             - containerPort: 1883
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "16Mi"
+            limits:
+              cpu: "100m"
+              memory: "64Mi"
           volumeMounts:
             - name: config
               mountPath: /mosquitto/config/mosquitto.conf
@@ -767,10 +864,16 @@ metadata:
   namespace: weather
 spec:
   schedule: "0,15,30,45 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2
   jobTemplate:
     spec:
+      ttlSecondsAfterFinished: 1800
       template:
         spec:
+          nodeSelector:
+            kubernetes.io/hostname: radxa-b
           restartPolicy: OnFailure
           hostAliases:
             - ip: 192.168.68.127
@@ -808,6 +911,13 @@ spec:
                   set -e
                   python -m pip install --no-cache-dir psycopg2-binary requests
                   python /opt/moxa/moxa_weather_import.py
+              resources:
+                requests:
+                  cpu: "50m"
+                  memory: "128Mi"
+                limits:
+                  cpu: "300m"
+                  memory: "384Mi"
               volumeMounts:
                 - name: moxa-importer-script
                   mountPath: /opt/moxa/moxa_weather_import.py
@@ -824,10 +934,16 @@ metadata:
   namespace: weather
 spec:
   schedule: "7,22,37,52 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2
   jobTemplate:
     spec:
+      ttlSecondsAfterFinished: 1800
       template:
         spec:
+          nodeSelector:
+            kubernetes.io/hostname: radxa-b
           restartPolicy: OnFailure
           containers:
             - name: pv-forecast
@@ -893,6 +1009,13 @@ spec:
                   set -e
                   python -m pip install --no-cache-dir psycopg2-binary
                   python /opt/forecast/pv_forecast_baseline.py
+              resources:
+                requests:
+                  cpu: "50m"
+                  memory: "128Mi"
+                limits:
+                  cpu: "300m"
+                  memory: "384Mi"
               volumeMounts:
                 - name: pv-forecast-script
                   mountPath: /opt/forecast/pv_forecast_baseline.py
