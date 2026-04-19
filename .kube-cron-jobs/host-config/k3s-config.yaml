@@ -1,0 +1,6 @@
+write-kubeconfig-mode: "0644"
+
+kubelet-arg:
+  - "system-reserved=memory=512Mi,cpu=200m"
+  - "kube-reserved=memory=256Mi,cpu=200m"
+  - "eviction-hard=memory.available<300Mi,nodefs.available<10%"

@@ -1,4 +1,9 @@
 #!/bin/bash
+
+if [ "${APPLY_HOST_CONFIG:-0}" = "1" ]; then
+  /home/vuola/.kube-cron-jobs/install-host-config.sh
+fi
+
 username="vuola"
 kube_cron_jobs_dir="/home/"$username"/.kube-cron-jobs"
 manifests_dir="/var/lib/rancher/k3s/server/manifests"

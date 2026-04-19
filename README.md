@@ -8,6 +8,7 @@ This repository documents the weather archive stack running on radxa-a.local and
 - [Cluster Architecture](#cluster-architecture)
 - [Quick Start: Maintenance & Deployment](#quick-start-maintenance--deployment)
   - [Editing and deploying code changes](#editing-and-deploying-code-changes)
+  - [Host-level K3s configuration](#host-level-k3s-configuration)
   - [Common maintenance tasks](#common-maintenance-tasks)
 - [Components on radxa-a.local](#components-on-radxa-a-local)
   - [Editing manifests (correct workflow)](#editing-manifests-correct-workflow)
@@ -119,6 +120,7 @@ This section provides the essential workflows for software maintainers.
 - **Kubernetes manifests**: `/home/vuola/.kube-cron-jobs/local-manifests/` (e.g., weather.yaml)
 - **Web files** (PHP): `/home/vuola/.kube-cron-jobs/weather-web/` (index.php, api/health.php, export.php, ingest.php)
 - **Import scripts** (Python): `/home/vuola/.kube-cron-jobs/weather-scripts/` (entsoe_import.py, fmi_forecast_import.py, moxa_weather_import.py)
+- **Host-level K3s config**: `/home/vuola/.kube-cron-jobs/host-config/k3s-config.yaml`
 
 **How to deploy**:
 
@@ -128,7 +130,11 @@ This section provides the essential workflows for software maintainers.
 # 2. Deploy changes (regenerates ConfigMaps and applies manifests)
 sudo /home/vuola/.kube-cron-jobs/update-cluster.sh
 
-# 3. Verify deployment
+
+# 3. If host-level K3s settings changed, deploy those too
+sudo APPLY_HOST_CONFIG=1 /home/vuola/.kube-cron-jobs/update-cluster.sh
+
+# 4. Verify deployment
 kubectl -n weather get pods
 kubectl -n weather rollout status deployment/weather-web
 ```
@@ -137,6 +143,58 @@ The `update-cluster.sh` script:
 - Generates ConfigMaps from weather-web/ and weather-scripts/ directories
 - Substitutes HOSTNAME placeholders in manifests
 - Copies rendered manifests to `/var/lib/rancher/k3s/server/manifests/` for k3s auto-apply
+- Optionally applies tracked host config from `host-config/k3s-config.yaml` when `APPLY_HOST_CONFIG=1`
+
+### Host-level K3s configuration
+
+Some stability settings are **host-level** and are not part of the Kubernetes manifests.  
+These are tracked in the repository so the system remains portable to replacement hardware.
+
+Tracked file:
+
+- `/home/vuola/.kube-cron-jobs/host-config/k3s-config.yaml`
+
+Installed target on the host:
+
+- `/etc/rancher/k3s/config.yaml`
+
+Installer script:
+
+- `/home/vuola/.kube-cron-jobs/install-host-config.sh`
+
+To apply both cluster manifests and the tracked host-level K3s configuration:
+
+```bash
+sudo APPLY_HOST_CONFIG=1 /home/vuola/.kube-cron-jobs/update-cluster.sh
+```
+
+This will:
+1. compare the tracked config with `/etc/rancher/k3s/config.yaml`
+2. back up the old file if needed
+3. install the new file
+4. restart `k3s` only if the config changed
+
+Current tracked settings include kubelet memory reservation and eviction thresholds to reduce the risk of node instability during RAM exhaustion:
+
+```yaml
+write-kubeconfig-mode: "0644"
+
+kubelet-arg:
+  - "system-reserved=memory=512Mi,cpu=200m"
+  - "kube-reserved=memory=256Mi,cpu=200m"
+  - "eviction-hard=memory.available<300Mi,nodefs.available<10%"
+```
+
+**Verification**:
+
+```bash
+sudo cat /etc/rancher/k3s/config.yaml
+kubectl get nodes
+kubectl -n kube-system get pods | grep traefik
+kubectl -n weather get pods
+```
+
+**Note**: secrets, tokens, and machine-specific credentials should still remain outside Git.
 
 ### Common maintenance tasks
 
