@@ -189,3 +189,216 @@ This roadmap milestone is complete when all of the following hold:
 - Keep the PV forecaster operational as-is.
 - Do not mix discretionary event spikes into baseline training target.
 - Prefer incremental deployment and validation phase by phase.
+
+## Future Plans (Cost Optimization)
+
+Live-system changes are paused for now. The following items define the next implementation stage focused on reducing electricity cost.
+
+### Phase 6: EV Charging Start-Time Optimizer (Planned)
+
+Objective:
+- Propose the optimal EV charging start time between `06:30` and `22:30` based on expected cheapest effective energy source.
+
+Decision inputs:
+- Forecasted self-produced electricity availability
+- Forecasted battery-stored energy availability
+- Forecasted grid electricity price (lowest-cost windows)
+
+Expected output:
+- Recommended EV charging start time for the selected day
+- Cost rationale for the recommendation (solar-first, battery-first, or grid-price-first)
+- Optional ranked alternatives (top 2-3 start windows)
+
+Initial constraints:
+- Recommendation window limited to `06:30-22:30`
+- Preserve user comfort and charging readiness constraints (minimum target state before departure)
+
+### Phase 7: Geothermal Pump Price-Aware Deferral (Planned)
+
+Objective:
+- Delay geothermal pump operation when grid power is expected to be expensive and household import risk is high, while minimizing hot-water discomfort.
+
+Decision inputs:
+- Anticipated grid import need
+- Forecasted grid electricity price
+- Household load context (sauna, dishwasher, laundry, and other known warm-water-demand events)
+
+Deferral policy limits (temperature-adaptive):
+- Maximum delay `5 hours` when outside temperature is `>= +20°C`
+- Maximum delay `1 hour` when outside temperature is `<= -20°C`
+- For intermediate temperatures, use linear interpolation between those endpoints
+
+Linear limit definition:
+- Let outside temperature be `T` in `°C`, clamped to `[-20, +20]`
+- Maximum deferral in hours:
+   `max_delay_h = 1 + (T + 20) * (4 / 40)`
+   (equivalently `max_delay_h = 1 + 0.1 * (T + 20)`)
+
+Expected output:
+- Recommended delay duration and restart time
+- Risk/comfort score indicating likelihood of hot-water shortage
+- Clear fallback rule: cancel delay if comfort risk exceeds threshold
+
+### Phase 8: Supervisory Cost Controller and UX (Planned)
+
+Objective:
+- Combine EV start optimization and geothermal deferral into a single supervisory controller that can propose, explain, and later automate low-risk actions.
+
+Planned capabilities:
+- Day-ahead optimization summary (expected savings and confidence)
+- Action log for accepted/rejected recommendations
+- Safety guardrails and override controls
+- Tracking of realized cost savings vs baseline behavior
+
+## Phase 6-8: Prerequisite Capabilities Checklist
+
+Before implementing the cost-optimization phases (6-8), the following intermediate capabilities must be developed. Each defines a specific contract and acceptance criteria.
+
+### 1. Battery Availability Forecasting
+
+**Purpose**: Provide time-series forecasts of available battery energy for cost optimization decisions.
+
+**Acceptance Criteria**:
+- [ ] Battery state-of-charge (SOC) forecast: 24-hour horizon, 15-minute resolution
+- [ ] Discharge power capability: hourly max discharge rate (W) accounting for thermal limits
+- [ ] Reserve floor constraint: system reserves at least 15% SOC for emergency discharge
+- [ ] Round-trip efficiency model: account for charge/discharge cycle losses (≥93% round-trip assumed)
+- [ ] API or view: `battery_forecast_15min` view with `target_ts`, `soc_p50`, `discharge_power_w`, `efficiency_ratio`
+
+**Dependencies**: Battery telemetry, historical charge/discharge patterns, thermal model calibration
+
+---
+
+### 2. Event Probability Modeling
+
+**Purpose**: Forecast discrete household events (sauna, dishwasher, laundry, etc.) to predict demand spikes and deferral opportunities.
+
+**Acceptance Criteria**:
+- [ ] Event occurrence probabilities: per-event per-15-minute-slot probability table for each weekday (Monday-Sunday)
+- [ ] Events modeled: sauna, dishwasher, laundry, oven, water heating
+- [ ] Probability input features: time-of-day, day-of-week, seasonal month, user presence/occupancy status (if available)
+- [ ] Output table: `event_probability_15min` with columns `target_ts`, `event_type`, `probability_pct`, `expected_power_w`, `typical_duration_min`
+- [ ] Training data: at least 8 weeks of component actuals to establish baseline rates
+- [ ] Retrain trigger: weekly or monthly to capture seasonal shifts
+
+**Dependencies**: `home_consumption_components_15min` (training target), occupancy signals (if available)
+
+---
+
+### 3. Thermal Buffer (Hot Water) Proxy Model
+
+**Purpose**: Estimate comfort risk when deferring geothermal pump operation.
+
+**Acceptance Criteria**:
+- [ ] Depletion risk score: lightweight model predicting hot-water availability depletion over deferral window
+- [ ] Comfort classification: low (safe to defer ≤4h), medium (safe ≤2h), high (unsafe, risk of shortage)
+- [ ] Input features: current (or last-known) hot-water volume, ambient temperature, forecasted event probabilities (sauna, dishwasher, shower)
+- [ ] Output: comfort_level (low/medium/high) and estimated recovery time if depleted
+- [ ] Model requirement: simple heuristic or lightweight regression; must execute in <100ms
+- [ ] Fallback: conservative assumption (high risk) when telemetry is missing
+
+**Dependencies**: Hot-water tank temperature telemetry (if available), event probability model, ambient temperature
+
+---
+
+### 4. Net Import Risk Forecast
+
+**Purpose**: Forecast the distribution of household grid power import, not just the mean, to enable safe deferral and charging decisions.
+
+**Acceptance Criteria**:
+- [ ] Import distribution forecast: p10, p50, p90 percentiles over 24-hour horizon at 15-min resolution
+- [ ] Calculation basis: forecasted solar output, battery discharge limits, event probabilities, baseline consumption
+- [ ] Formula: `net_import = baseline_w + (event_prob * event_power) - solar_forecast - available_battery_discharge`
+- [ ] Output table: `net_import_forecast_15min` with columns `target_ts`, `import_p10_w`, `import_p50_w`, `import_p90_w`
+- [ ] Percentile method: Monte Carlo sampling (≥1000 samples) across forecast uncertainty bands
+- [ ] Validation: compare p50 vs actual import over past 30 days, RMSE <500W acceptable
+
+**Dependencies**: Solar forecast, battery forecast, event probability model, baseline consumption forecast
+
+---
+
+### 5. Price-Aware Decision Engine
+
+**Purpose**: Optimize EV charging start times and geothermal deferral decisions to minimize expected energy cost.
+
+**Acceptance Criteria**:
+- [ ] EV charging optimizer: algorithm that selects cheapest start-time window within 06:30-22:30
+  - [ ] Objective function: minimize `sum(net_import[t] * price[t])` over charging window
+  - [ ] Constraint: at least 24 kWh available from sources (solar + battery + grid) during selected window
+  - [ ] Constraint: complete charge within 8 hours (22:30 latest start)
+  - [ ] Output: recommended start time, confidence score, top 3 alternatives
+  
+- [ ] Geothermal deferral optimizer: maximize avoided cost subject to comfort and temperature constraints
+  - [ ] Objective: minimize `sum(deferred_import[t] * price[t])`
+  - [ ] Constraint: maximum deferral = `1 + 0.1 * (T + 20)` hours, where T ∈ [-20, +20]°C
+  - [ ] Constraint: comfort_level must not exceed HIGH at any deferred timestep
+  - [ ] Output: recommended delay duration, comfort risk level, estimated savings EUR/day
+  
+- [ ] API endpoint: `/api/cost-optimization` returning JSON with both recommendations and confidence intervals
+
+**Dependencies**: Net import risk forecast, electricity price forecast, battery forecast, thermal buffer model, event probability model
+
+---
+
+### 6. Confidence and Explainability Layer
+
+**Purpose**: Build user trust and enable safe automation by explaining recommendation drivers and predicted outcomes.
+
+**Acceptance Criteria**:
+- [ ] Recommendation confidence scores: each recommendation (EV start time, geothermal delay) includes 0-100% confidence
+- [ ] Confidence factors:
+  - [ ] Solar forecast uncertainty (clear days >90%, rainy days <60%)
+  - [ ] Price forecast availability (FMI/ENTSOE API health)
+  - [ ] Event probability coverage (weekend >85%, weekday >90%)
+  - [ ] Battery state certainty (recent SOC telemetry <30min old)
+  
+- [ ] Explainability: recommendation includes top-3 decision drivers attributed as percentage contribution
+  - Example: "Start EV at 13:00 for €2.15 savings (Solar 45% + Low Price 35% + Battery Risk 20%)"
+  
+- [ ] Savings forecast: predicted cost avoidance vs baseline (next 24h) with ±15% uncertainty band
+- [ ] UI requirement: display confidence and drivers on recommendation card
+
+**Dependencies**: All forecasting models, cost optimization engine, audit logging
+
+---
+
+### 7. Feedback Learning Loop
+
+**Purpose**: Continuously improve event probabilities and system recommendations by learning from actual user behavior and outcomes.
+
+**Acceptance Criteria**:
+- [ ] Feedback pipeline:
+  - [ ] Log all recommendations (accepted/rejected/timeout) with user action
+  - [ ] Log realized outcomes: actual sauna use, dishwasher cycle, grid import, cost vs prediction
+  - [ ] Weekly batch retraining of event probability models using last 8-week rolling window
+  
+- [ ] Metrics to track:
+  - [ ] Event prediction accuracy (recall, precision per event type)
+  - [ ] Cost savings actualization: predicted vs realized cost reduction (target >80% of predicted)
+  - [ ] User acceptance rate: percentage of recommendations accepted by user
+  - [ ] Recommendation diversity: ensure optimizer proposes varied windows over time (avoid local optima)
+  
+- [ ] Storage:
+  - [ ] Table `recommendation_log` (timestamp, recommendation_id, type, payload_json, accepted, action_timestamp)
+  - [ ] Table `outcome_log` (recommendation_id, actual_sauna, actual_dishwasher, actual_grid_import_wh, actual_cost_eur)
+  
+- [ ] Retraining automation:
+  - [ ] Weekly CronJob that retrains event probability models from `outcome_log`
+  - [ ] Validation: must not degrade baseline accuracy (event F1 score ≥ previous week)
+  - [ ] Deployment: automated push to `event_probability_15min` view if validation passes
+
+**Dependencies**: Recommendation and outcome logging infrastructure, event probability training pipeline, feedback database schema
+
+---
+
+## Implementation Sequence for Prerequisites
+
+1. **Battery Availability Forecasting** (lowest dependency, enables rest)
+2. **Event Probability Modeling** (enables thermal buffer, net import risk)
+3. **Thermal Buffer Proxy** (enables geothermal deferral safety checks)
+4. **Net Import Risk Forecast** (enables cost optimization)
+5. **Price-Aware Decision Engine** (core optimization, depends on 1-4)
+6. **Confidence and Explainability Layer** (depends on all prior, can parallelize with 5)
+7. **Feedback Learning Loop** (depends on all prior, enables continuous improvement)
+
+When all 7 prerequisites are complete and validated, proceed to Phase 6-8 implementation with high confidence.
