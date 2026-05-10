@@ -53,9 +53,13 @@ $stmt = $pdo->prepare(
    )
    SELECT
      s.target_ts,
-     h.home_consumption_actual_w
+     c.home_consumption_actual_w,
+     c.baseline_actual_w,
+     c.ev_actual_w,
+     c.sauna_actual_w,
+     c.other_actual_w
    FROM slots s
-   LEFT JOIN home_consumption_actual_15min h ON h.ts = s.target_ts
+   LEFT JOIN home_consumption_components_15min c ON c.ts = s.target_ts
    ORDER BY s.target_ts ASC"
 );
 $stmt->execute([
@@ -67,6 +71,10 @@ $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 $actualPointCount = 0;
 $missingPointCount = 0;
 $sumW = 0.0;
+$sumBaseW = 0.0;
+$sumEvW = 0.0;
+$sumSaunaW = 0.0;
+$sumOtherW = 0.0;
 $peakW = null;
 foreach ($rows as $row) {
   if ($row['home_consumption_actual_w'] === null) {
@@ -74,7 +82,16 @@ foreach ($rows as $row) {
     continue;
   }
   $w = (float)$row['home_consumption_actual_w'];
+  $baseW = (float)($row['baseline_actual_w'] ?? 0);
+  $evW = (float)($row['ev_actual_w'] ?? 0);
+  $saunaW = (float)($row['sauna_actual_w'] ?? 0);
+  $otherW = (float)($row['other_actual_w'] ?? 0);
+  
   $sumW += $w;
+  $sumBaseW += $baseW;
+  $sumEvW += $evW;
+  $sumSaunaW += $saunaW;
+  $sumOtherW += $otherW;
   $actualPointCount++;
   if ($peakW === null || $w > $peakW) {
     $peakW = $w;
@@ -84,6 +101,10 @@ foreach ($rows as $row) {
 $avgText = $actualPointCount > 0 ? number_format($sumW / $actualPointCount, 0, '.', '') . ' W' : 'n/a';
 $peakText = $peakW !== null ? number_format($peakW, 0, '.', '') . ' W' : 'n/a';
 $energyText = number_format($sumW / 4000.0, 2, '.', '') . ' kWh';
+$baseEnergyText = number_format($sumBaseW / 4000.0, 2, '.', '') . ' kWh';
+$evEnergyText = number_format($sumEvW / 4000.0, 2, '.', '') . ' kWh';
+$saunaEnergyText = number_format($sumSaunaW / 4000.0, 2, '.', '') . ' kWh';
+$otherEnergyText = number_format($sumOtherW / 4000.0, 2, '.', '') . ' kWh';
 
 header('Content-Type: text/html; charset=utf-8');
 echo "<!doctype html>";
@@ -120,13 +141,18 @@ echo "<h1>Home Consumption Actual</h1>";
 echo "<div class=\"tabs\"><a href=\"/\">Main dashboard</a><a href=\"?date=today\">Today</a><a href=\"?date=tomorrow\">Tomorrow</a></div>";
 echo "<p class=\"meta\">Date: " . htmlspecialchars($startLocal->format('Y-m-d')) . " (Europe/Helsinki)</p>";
 echo "<p class=\"meta\">Series: household consumption power excluding solar production and battery charging components.</p>";
+echo "<p class=\"meta\">Component split uses canonical DB view `home_consumption_components_15min`: EV 4.5-8.5 kW excess, Sauna 9.0-13.0 kW excess, other residual events above 2.5 kW.</p>";
 
 echo "<div class=\"kpi\">";
 echo "<div class=\"item\"><div class=\"label\">Actual points in selected day</div><div class=\"value\">" . $actualPointCount . " / " . count($rows) . "</div></div>";
 echo "<div class=\"item\"><div class=\"label\">Missing points</div><div class=\"value\">" . $missingPointCount . "</div></div>";
 echo "<div class=\"item\"><div class=\"label\">Average consumption</div><div class=\"value\">" . htmlspecialchars($avgText) . "</div></div>";
 echo "<div class=\"item\"><div class=\"label\">Peak consumption</div><div class=\"value\">" . htmlspecialchars($peakText) . "</div></div>";
-echo "<div class=\"item\"><div class=\"label\">Daily energy from points</div><div class=\"value\">" . htmlspecialchars($energyText) . "</div></div>";
+echo "<div class=\"item\"><div class=\"label\">Total daily energy</div><div class=\"value\">" . htmlspecialchars($energyText) . "</div></div>";
+echo "<div class=\"item\"><div class=\"label\">Baseline component</div><div class=\"value\">" . htmlspecialchars($baseEnergyText) . "</div></div>";
+echo "<div class=\"item\"><div class=\"label\">EV charging</div><div class=\"value\">" . htmlspecialchars($evEnergyText) . "</div></div>";
+echo "<div class=\"item\"><div class=\"label\">Sauna heating</div><div class=\"value\">" . htmlspecialchars($saunaEnergyText) . "</div></div>";
+echo "<div class=\"item\"><div class=\"label\">Other load</div><div class=\"value\">" . htmlspecialchars($otherEnergyText) . "</div></div>";
 echo "</div>";
 echo "</div>";
 
@@ -137,15 +163,27 @@ if (!$rows) {
 }
 
 echo "<div class=\"card table-wrap\">";
-echo "<table><thead><tr><th>Time</th><th>Actual W</th></tr></thead><tbody>";
+echo "<table><thead><tr><th>Time</th><th>Actual W</th><th>Base W</th><th>EV W</th><th>Sauna W</th><th>Other W</th></tr></thead><tbody>";
 foreach ($rows as $row) {
   $tsLocal = (new DateTimeImmutable($row['target_ts']))->setTimezone($tz);
   $actual = $row['home_consumption_actual_w'] !== null ? (float)$row['home_consumption_actual_w'] : null;
+  $base = $row['baseline_actual_w'] !== null ? (float)$row['baseline_actual_w'] : null;
+  $ev = $row['ev_actual_w'] !== null ? (float)$row['ev_actual_w'] : null;
+  $sauna = $row['sauna_actual_w'] !== null ? (float)$row['sauna_actual_w'] : null;
+  $other = $row['other_actual_w'] !== null ? (float)$row['other_actual_w'] : null;
   $actualText = $actual === null ? '-' : number_format($actual, 0, '.', '');
+  $baseText = $base === null ? '-' : number_format($base, 0, '.', '');
+  $evText = $ev === null ? '-' : number_format($ev, 0, '.', '');
+  $saunaText = $sauna === null ? '-' : number_format($sauna, 0, '.', '');
+  $otherText = $other === null ? '-' : number_format($other, 0, '.', '');
 
   echo '<tr>';
   echo '<td>' . htmlspecialchars($tsLocal->format('H:i')) . '</td>';
   echo '<td>' . htmlspecialchars($actualText) . '</td>';
+  echo '<td>' . htmlspecialchars($baseText) . '</td>';
+  echo '<td>' . htmlspecialchars($evText) . '</td>';
+  echo '<td>' . htmlspecialchars($saunaText) . '</td>';
+  echo '<td>' . htmlspecialchars($otherText) . '</td>';
   echo '</tr>';
 }
 echo "</tbody></table></div>";

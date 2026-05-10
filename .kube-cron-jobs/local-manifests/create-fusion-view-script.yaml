@@ -21,7 +21,12 @@ data:
     \ m.bat_discharge_w,\n  m.sma_json\nFROM entsoe_prices e\nLEFT JOIN fmi_forecast
     f1 ON date_trunc('hour', e.ts) = f1.ts\nLEFT JOIN fmi_forecast f2 ON date_trunc('hour',
     e.ts) + interval '1 hour' = f2.ts\nLEFT JOIN moxa_weather_15min m ON e.ts = m.ts\nORDER
-    BY e.ts;\n"
+    BY e.ts;\n\nCREATE OR REPLACE VIEW home_consumption_actual_15min AS\nSELECT\n
+    \ ts,\n  GREATEST(\n    0,\n    pv_feed_in_w\n    - active_power_pcc_w\n    +
+    bat_discharge_w\n    - bat_charge_w\n  )::INTEGER AS home_consumption_actual_w\nFROM
+    weather_fusion\nWHERE ts IS NOT NULL\n  AND pv_feed_in_w IS NOT NULL\n  AND active_power_pcc_w
+    IS NOT NULL\n  AND bat_discharge_w IS NOT NULL\n  AND bat_charge_w IS NOT NULL\nORDER
+    BY ts;\n"
 kind: ConfigMap
 metadata:
   name: create-fusion-view-script
