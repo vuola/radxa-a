@@ -287,17 +287,20 @@ Before implementing the cost-optimization phases (6-8), the following intermedia
 
 ### 3. Thermal Buffer (Hot Water) Proxy Model
 
-**Purpose**: Estimate comfort risk when deferring geothermal pump operation.
+**Purpose**: Estimate comfort risk when deferring geothermal pump operation using heuristics and user feedback (no direct telemetry available).
+
+**Note**: Geothermal heater has no digital input for warm-water tank state. Model is based on historical usage patterns and user-reported discomfort events.
 
 **Acceptance Criteria**:
-- [ ] Depletion risk score: lightweight model predicting hot-water availability depletion over deferral window
-- [ ] Comfort classification: low (safe to defer ≤4h), medium (safe ≤2h), high (unsafe, risk of shortage)
-- [ ] Input features: current (or last-known) hot-water volume, ambient temperature, forecasted event probabilities (sauna, dishwasher, shower)
-- [ ] Output: comfort_level (low/medium/high) and estimated recovery time if depleted
-- [ ] Model requirement: simple heuristic or lightweight regression; must execute in <100ms
-- [ ] Fallback: conservative assumption (high risk) when telemetry is missing
+- [ ] Depletion risk heuristic: conservative model based on time-of-day, forecasted sauna/dishwasher/laundry events, and ambient temperature
+- [ ] Comfort classification: low (safe to defer ≤3h), medium (safe ≤1.5h), high (unsafe, recommend no deferral)
+- [ ] Input features: time-of-day, ambient temperature, forecasted event probabilities (sauna, dishwasher, laundry)
+- [ ] Output: comfort_level (low/medium/high) and recommended max deferral window for selected comfort level
+- [ ] Model requirement: simple rule-based heuristic; must execute in <100ms
+- [ ] User feedback integration: system logs user-reported "hot water shortage" events for continuous refinement
+- [ ] Refinement rule: if user reports discomfort during/after recommended deferral, increase conservative factor for future similar conditions
 
-**Dependencies**: Hot-water tank temperature telemetry (if available), event probability model, ambient temperature
+**Dependencies**: Event probability model, ambient temperature forecast, user feedback logging table for discomfort events
 
 ---
 
@@ -364,11 +367,12 @@ Before implementing the cost-optimization phases (6-8), the following intermedia
 
 ### 7. Feedback Learning Loop
 
-**Purpose**: Continuously improve event probabilities and system recommendations by learning from actual user behavior and outcomes.
+**Purpose**: Continuously improve event probabilities, thermal buffer risk assessments, and system recommendations by learning from actual user behavior and outcomes.
 
 **Acceptance Criteria**:
 - [ ] Feedback pipeline:
-  - [ ] Log all recommendations (accepted/rejected/timeout) with user action
+  - [ ] Log all recommendations (accepted/rejected/timeout) with user action and timestamp
+  - [ ] Log user-reported discomfort events (especially hot-water shortage during/after deferral)
   - [ ] Log realized outcomes: actual sauna use, dishwasher cycle, grid import, cost vs prediction
   - [ ] Weekly batch retraining of event probability models using last 8-week rolling window
   
@@ -376,18 +380,21 @@ Before implementing the cost-optimization phases (6-8), the following intermedia
   - [ ] Event prediction accuracy (recall, precision per event type)
   - [ ] Cost savings actualization: predicted vs realized cost reduction (target >80% of predicted)
   - [ ] User acceptance rate: percentage of recommendations accepted by user
+  - [ ] Thermal buffer model refinement: discomfort event rate (target <5% of deferrals should trigger discomfort feedback)
   - [ ] Recommendation diversity: ensure optimizer proposes varied windows over time (avoid local optima)
   
 - [ ] Storage:
   - [ ] Table `recommendation_log` (timestamp, recommendation_id, type, payload_json, accepted, action_timestamp)
   - [ ] Table `outcome_log` (recommendation_id, actual_sauna, actual_dishwasher, actual_grid_import_wh, actual_cost_eur)
+  - [ ] Table `user_feedback_log` (timestamp, feedback_type, event_description, deferral_window_affected, recommendation_id_if_related)
   
 - [ ] Retraining automation:
-  - [ ] Weekly CronJob that retrains event probability models from `outcome_log`
+  - [ ] Weekly CronJob that retrains event probability models from `outcome_log` and `user_feedback_log`
+  - [ ] Thermal buffer model tuning: adjust conservative factors based on `user_feedback_log` discomfort events
   - [ ] Validation: must not degrade baseline accuracy (event F1 score ≥ previous week)
   - [ ] Deployment: automated push to `event_probability_15min` view if validation passes
 
-**Dependencies**: Recommendation and outcome logging infrastructure, event probability training pipeline, feedback database schema
+**Dependencies**: Recommendation and outcome logging infrastructure, user feedback UI, event probability training pipeline, feedback database schema
 
 ---
 
