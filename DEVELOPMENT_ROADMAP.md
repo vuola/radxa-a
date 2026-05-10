@@ -149,7 +149,7 @@ Deliverable:
 - UI now shows `Base Fcst W` from the latest `forecast_value` baseline run alongside `Base W`
 - Future slots render forecast-only baseline values when actual component rows are not yet available
 
-### Phase 5: Evaluation and Operations
+### Phase 5: Evaluation and Operations ✓ DONE
 
 1. Add baseline-specific metrics:
    - MAE, RMSE, bias
@@ -161,7 +161,10 @@ Deliverable:
 
 - Operable baseline forecasting system with traceable quality and health.
 
-**Status**: Next phase
+**Completion Date**: 2026-05-10
+- Home Consumption UI now shows baseline forecast metadata plus selected-day and rolling 24h/7d MAE, RMSE, and bias
+- Health API now checks baseline forecast freshness and next-6h horizon coverage
+- README now documents baseline model version, feature set, and decomposition threshold contract
 
 ## Implementation Order
 
@@ -179,7 +182,7 @@ This roadmap milestone is complete when all of the following hold:
 - ✓ Home Consumption page shows real total plus all real components (Phase 2)
 - ✓ Baseline forecast runs automatically every 15 minutes and is versioned in DB (Phase 3)
 - ✓ Home Consumption page shows baseline actual vs baseline forecast (Phase 4)
-- ⧗ Baseline forecast quality and freshness are monitored (Phase 5)
+- ✓ Baseline forecast quality and freshness are monitored (Phase 5)
 
 ## Notes
 

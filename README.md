@@ -350,11 +350,15 @@ Returns JSON with overall system status and any failing checks:
    - ≤60 minutes: WARN (data delayed)
    - >60 minutes: ERROR (import likely failing)
 3. **FMI forecast horizon** — Forecast covers at least +6 hours ahead
-4. **ENTSOE prices coverage** — Today's price data present
-5. **Backup validity** — Latest successful backup run (from PostgreSQL `backup_runs` metadata):
+4. **Baseline forecast freshness** — Latest `baseline_w` run:
+  - ≤30 minutes old and 24/24 rows covering next 6 hours: OK
+  - ≤60 minutes old or partial next-6h coverage: WARN
+  - >60 minutes old or fewer than 20/24 next-6h rows: ERROR
+5. **ENTSOE prices coverage** — Today's price data present
+6. **Backup validity** — Latest successful backup run (from PostgreSQL `backup_runs` metadata):
    - Age ≤26 hours (nightly backup at 02:15)
    - File size ≥100KB (validates against zero-byte dumps)
-6. **Parquet export freshness** — Latest export age ≤30 minutes
+7. **Parquet export freshness** — Latest export age ≤30 minutes
 
 **Web UI integration**:
 
@@ -1114,11 +1118,21 @@ Page behavior:
 - Uses `home_consumption_actual_15min` view as the source.
 - Shows full-day 15-minute slots (`96` rows) and marks missing points as `-`.
 - Includes compact KPIs (actual point count, missing points, average W, peak W, daily kWh).
+- Shows baseline forecast metadata plus selected-day and rolling 24h/7d `MAE`, `RMSE`, and bias for `baseline_w` where actuals exist.
+- Uses the newest available baseline forecast per target timestamp so the historical comparison fills in as runs accumulate.
 - Date switch options: `?date=today`, `?date=tomorrow`, or `?day=YYYY-MM-DD`.
 
 Consumption signal definition:
 - `home_consumption_actual_w = GREATEST(0, moxa_pv_feed_in_w - moxa_active_power_pcc_w + moxa_bat_discharge_w - moxa_bat_charge_w)`
 - With PCC sign convention: positive `moxa_active_power_pcc_w` means export, negative means import.
+
+Baseline forecast contract:
+- Target: `baseline_actual_w` from `home_consumption_components_15min`
+- Current model identifier: `baseline_consumption baseline-v1`
+- Feature set: forecast temperature, wind speed, cloud cover, shortwave radiation, hour-of-day, day-of-week
+- Training window: last 14 days by default
+- Decomposition thresholds: EV `4.5-8.5 kW` excess, Sauna `9.0-13.0 kW` excess, Other `>2.5 kW` residual
+- Baseline intentionally includes geothermal IVT room heating and tap water heater duty-cycle spikes
 
 ### Manual test and troubleshooting
 

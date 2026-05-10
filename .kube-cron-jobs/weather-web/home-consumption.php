@@ -43,34 +43,59 @@ $endLocal = $startLocal->modify('+1 day');
 $startUtc = $startLocal->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d H:i:sP');
 $endUtc = $endLocal->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d H:i:sP');
 
+$runStmt = $pdo->query(
+  "SELECT run_id, model_name, model_version, issued_at, notes
+   FROM forecast_run
+   WHERE target = 'baseline_w'
+   ORDER BY issued_at DESC
+   LIMIT 1"
+);
+$latestBaselineRun = $runStmt->fetch(PDO::FETCH_ASSOC);
+
 $stmt = $pdo->prepare(
-  "WITH latest_baseline_run AS (
-     SELECT MAX(run_id) AS run_id
-     FROM forecast_value
-     WHERE target = 'baseline_w'
-   ),
-   slots AS (
+  "WITH slots AS (
      SELECT generate_series(
        :start::timestamptz,
        (:end::timestamptz - interval '15 minutes'),
        interval '15 minutes'
      ) AS target_ts
+   ),
+   best_forecast AS (
+     SELECT DISTINCT ON (fv.target_ts)
+       fv.target_ts,
+       fv.horizon_min,
+       fv.yhat_p50,
+       fv.yhat_p10,
+       fv.yhat_p90,
+       fr.run_id,
+       fr.model_name,
+       fr.model_version,
+       fr.issued_at
+     FROM forecast_value fv
+     JOIN forecast_run fr ON fr.run_id = fv.run_id
+     WHERE fv.target = 'baseline_w'
+       AND fr.target = 'baseline_w'
+       AND fv.target_ts >= :start
+       AND fv.target_ts < :end
+     ORDER BY fv.target_ts, fr.issued_at DESC, fr.run_id DESC
    )
    SELECT
      s.target_ts,
      c.home_consumption_actual_w,
      c.baseline_actual_w,
-     fv.yhat_p50 AS baseline_forecast_w,
+     bf.yhat_p50 AS baseline_forecast_w,
+     bf.yhat_p10 AS baseline_forecast_p10_w,
+     bf.yhat_p90 AS baseline_forecast_p90_w,
+     bf.run_id AS baseline_forecast_run_id,
+     bf.model_name AS baseline_forecast_model_name,
+     bf.model_version AS baseline_forecast_model_version,
+     bf.issued_at AS baseline_forecast_issued_at,
      c.ev_actual_w,
      c.sauna_actual_w,
      c.other_actual_w
    FROM slots s
    LEFT JOIN home_consumption_components_15min c ON c.ts = s.target_ts
-   LEFT JOIN latest_baseline_run lr ON true
-   LEFT JOIN forecast_value fv
-     ON fv.target_ts = s.target_ts
-    AND fv.target = 'baseline_w'
-    AND fv.run_id = lr.run_id
+   LEFT JOIN best_forecast bf ON bf.target_ts = s.target_ts
    ORDER BY s.target_ts ASC"
 );
 $stmt->execute([
@@ -86,28 +111,123 @@ $sumBaseW = 0.0;
 $sumEvW = 0.0;
 $sumSaunaW = 0.0;
 $sumOtherW = 0.0;
+$forecastPointCount = 0;
+$errorCount = 0;
+$absErrorSum = 0.0;
+$sqErrorSum = 0.0;
+$errorSum = 0.0;
+$runIdSet = [];
+$modelSet = [];
+$latestIssuedAt = null;
 $peakW = null;
 foreach ($rows as $row) {
+  if ($row['baseline_forecast_w'] !== null) {
+    $forecastPointCount++;
+  }
+  if ($row['baseline_forecast_run_id'] !== null) {
+    $runIdSet[(string)$row['baseline_forecast_run_id']] = true;
+  }
+  if ($row['baseline_forecast_model_name'] !== null && $row['baseline_forecast_model_version'] !== null) {
+    $modelSet[(string)$row['baseline_forecast_model_name'] . ' ' . (string)$row['baseline_forecast_model_version']] = true;
+  }
+  if ($row['baseline_forecast_issued_at'] !== null) {
+    $ts = (new DateTimeImmutable((string)$row['baseline_forecast_issued_at']))->getTimestamp();
+    if ($latestIssuedAt === null || $ts > $latestIssuedAt) {
+      $latestIssuedAt = $ts;
+    }
+  }
+
   if ($row['home_consumption_actual_w'] === null) {
     $missingPointCount++;
-    continue;
-  }
-  $w = (float)$row['home_consumption_actual_w'];
-  $baseW = (float)($row['baseline_actual_w'] ?? 0);
-  $evW = (float)($row['ev_actual_w'] ?? 0);
-  $saunaW = (float)($row['sauna_actual_w'] ?? 0);
-  $otherW = (float)($row['other_actual_w'] ?? 0);
-  
-  $sumW += $w;
-  $sumBaseW += $baseW;
-  $sumEvW += $evW;
-  $sumSaunaW += $saunaW;
-  $sumOtherW += $otherW;
-  $actualPointCount++;
-  if ($peakW === null || $w > $peakW) {
-    $peakW = $w;
+  } else {
+    $w = (float)$row['home_consumption_actual_w'];
+    $baseW = (float)($row['baseline_actual_w'] ?? 0);
+    $evW = (float)($row['ev_actual_w'] ?? 0);
+    $saunaW = (float)($row['sauna_actual_w'] ?? 0);
+    $otherW = (float)($row['other_actual_w'] ?? 0);
+
+    $sumW += $w;
+    $sumBaseW += $baseW;
+    $sumEvW += $evW;
+    $sumSaunaW += $saunaW;
+    $sumOtherW += $otherW;
+    $actualPointCount++;
+    if ($peakW === null || $w > $peakW) {
+      $peakW = $w;
+    }
+
+    if ($row['baseline_forecast_w'] !== null) {
+      $errW = $baseW - (float)$row['baseline_forecast_w'];
+      $absErrorSum += abs($errW);
+      $sqErrorSum += $errW * $errW;
+      $errorSum += $errW;
+      $errorCount++;
+    }
   }
 }
+
+$rollingStmt = $pdo->query(
+  "WITH best_forecast AS (
+     SELECT DISTINCT ON (fv.target_ts)
+       fv.target_ts,
+       fv.yhat_p50,
+       fr.issued_at,
+       fr.model_name,
+       fr.model_version
+     FROM forecast_value fv
+     JOIN forecast_run fr ON fr.run_id = fv.run_id
+     WHERE fv.target = 'baseline_w'
+       AND fr.target = 'baseline_w'
+     ORDER BY fv.target_ts, fr.issued_at DESC, fr.run_id DESC
+   ),
+   eval AS (
+     SELECT
+       bf.target_ts,
+       (c.baseline_actual_w::double precision - bf.yhat_p50::double precision) AS err_w
+     FROM best_forecast bf
+     JOIN home_consumption_components_15min c ON c.ts = bf.target_ts
+     WHERE c.baseline_actual_w IS NOT NULL
+       AND bf.yhat_p50 IS NOT NULL
+   )
+   SELECT
+     COUNT(*) FILTER (WHERE target_ts >= now() - interval '1 day') AS day_count,
+     AVG(ABS(err_w)) FILTER (WHERE target_ts >= now() - interval '1 day') AS day_mae,
+     SQRT(AVG(POWER(err_w, 2)) FILTER (WHERE target_ts >= now() - interval '1 day')) AS day_rmse,
+     AVG(err_w) FILTER (WHERE target_ts >= now() - interval '1 day') AS day_bias,
+     COUNT(*) FILTER (WHERE target_ts >= now() - interval '7 days') AS week_count,
+     AVG(ABS(err_w)) FILTER (WHERE target_ts >= now() - interval '7 days') AS week_mae,
+     SQRT(AVG(POWER(err_w, 2)) FILTER (WHERE target_ts >= now() - interval '7 days')) AS week_rmse,
+     AVG(err_w) FILTER (WHERE target_ts >= now() - interval '7 days') AS week_bias
+   FROM eval"
+);
+$rolling = $rollingStmt->fetch(PDO::FETCH_ASSOC) ?: [];
+
+$healthStmt = $pdo->query(
+  "WITH latest AS (
+     SELECT run_id, issued_at, model_name, model_version, notes
+     FROM forecast_run
+     WHERE target = 'baseline_w'
+     ORDER BY issued_at DESC
+     LIMIT 1
+   )
+   SELECT
+     latest.run_id,
+     latest.model_name,
+     latest.model_version,
+     latest.issued_at,
+     latest.notes,
+     EXTRACT(EPOCH FROM (now() - latest.issued_at))/60.0 AS age_min,
+     COUNT(*) FILTER (
+       WHERE fv.target_ts >= now()
+         AND fv.target_ts < now() + interval '6 hours'
+     ) AS future_6h_count
+   FROM latest
+   LEFT JOIN forecast_value fv
+     ON fv.run_id = latest.run_id
+    AND fv.target = 'baseline_w'
+   GROUP BY latest.run_id, latest.model_name, latest.model_version, latest.issued_at, latest.notes"
+);
+$baselineHealth = $healthStmt->fetch(PDO::FETCH_ASSOC) ?: null;
 
 $avgText = $actualPointCount > 0 ? number_format($sumW / $actualPointCount, 0, '.', '') . ' W' : 'n/a';
 $peakText = $peakW !== null ? number_format($peakW, 0, '.', '') . ' W' : 'n/a';
@@ -116,6 +236,27 @@ $baseEnergyText = number_format($sumBaseW / 4000.0, 2, '.', '') . ' kWh';
 $evEnergyText = number_format($sumEvW / 4000.0, 2, '.', '') . ' kWh';
 $saunaEnergyText = number_format($sumSaunaW / 4000.0, 2, '.', '') . ' kWh';
 $otherEnergyText = number_format($sumOtherW / 4000.0, 2, '.', '') . ' kWh';
+$maeText = $errorCount > 0 ? number_format($absErrorSum / $errorCount, 1, '.', '') . ' W' : 'n/a';
+$rmseText = $errorCount > 0 ? number_format(sqrt($sqErrorSum / $errorCount), 1, '.', '') . ' W' : 'n/a';
+$biasText = $errorCount > 0 ? number_format($errorSum / $errorCount, 1, '.', '') . ' W' : 'n/a';
+$rollingDayMaeText = !empty($rolling['day_count']) ? number_format((float)$rolling['day_mae'], 1, '.', '') . ' W' : 'n/a';
+$rollingDayRmseText = !empty($rolling['day_count']) ? number_format((float)$rolling['day_rmse'], 1, '.', '') . ' W' : 'n/a';
+$rollingDayBiasText = !empty($rolling['day_count']) ? number_format((float)$rolling['day_bias'], 1, '.', '') . ' W' : 'n/a';
+$rollingWeekMaeText = !empty($rolling['week_count']) ? number_format((float)$rolling['week_mae'], 1, '.', '') . ' W' : 'n/a';
+$rollingWeekRmseText = !empty($rolling['week_count']) ? number_format((float)$rolling['week_rmse'], 1, '.', '') . ' W' : 'n/a';
+$rollingWeekBiasText = !empty($rolling['week_count']) ? number_format((float)$rolling['week_bias'], 1, '.', '') . ' W' : 'n/a';
+$modelText = count($modelSet) > 0
+  ? implode(', ', array_keys($modelSet))
+  : ($latestBaselineRun ? ((string)$latestBaselineRun['model_name'] . ' ' . (string)$latestBaselineRun['model_version']) : 'n/a');
+$issuedAtText = $latestIssuedAt !== null
+  ? (new DateTimeImmutable('@' . (string)$latestIssuedAt))->setTimezone($tz)->format('Y-m-d H:i')
+  : ($latestBaselineRun ? (new DateTimeImmutable((string)$latestBaselineRun['issued_at']))->setTimezone($tz)->format('Y-m-d H:i') : 'n/a');
+$baselineHealthText = 'No baseline forecast run found';
+if ($baselineHealth) {
+  $ageText = number_format((float)$baselineHealth['age_min'], 0, '.', '') . ' min old';
+  $coverageText = (string)$baselineHealth['future_6h_count'] . '/24 slots for next 6h';
+  $baselineHealthText = $ageText . ' | ' . $coverageText;
+}
 
 header('Content-Type: text/html; charset=utf-8');
 echo "<!doctype html>";
@@ -153,6 +294,11 @@ echo "<div class=\"tabs\"><a href=\"/\">Main dashboard</a><a href=\"?date=today\
 echo "<p class=\"meta\">Date: " . htmlspecialchars($startLocal->format('Y-m-d')) . " (Europe/Helsinki)</p>";
 echo "<p class=\"meta\">Series: household consumption power excluding solar production and battery charging components.</p>";
 echo "<p class=\"meta\">Component split uses canonical DB view `home_consumption_components_15min`: EV 4.5-8.5 kW excess, Sauna 9.0-13.0 kW excess, other residual events above 2.5 kW.</p>";
+echo "<p class=\"meta\">Baseline forecast model(s): <strong>" . htmlspecialchars($modelText) . "</strong> | Runs used in selected day: " . count($runIdSet) . " | Newest issue time: " . htmlspecialchars($issuedAtText) . "</p>";
+echo "<p class=\"meta\">Baseline forecast health: " . htmlspecialchars($baselineHealthText) . "</p>";
+if ($latestBaselineRun && !empty($latestBaselineRun['notes'])) {
+  echo "<p class=\"meta\">" . htmlspecialchars((string)$latestBaselineRun['notes']) . "</p>";
+}
 
 echo "<div class=\"kpi\">";
 echo "<div class=\"item\"><div class=\"label\">Actual points in selected day</div><div class=\"value\">" . $actualPointCount . " / " . count($rows) . "</div></div>";
@@ -164,6 +310,14 @@ echo "<div class=\"item\"><div class=\"label\">Baseline component</div><div clas
 echo "<div class=\"item\"><div class=\"label\">EV charging</div><div class=\"value\">" . htmlspecialchars($evEnergyText) . "</div></div>";
 echo "<div class=\"item\"><div class=\"label\">Sauna heating</div><div class=\"value\">" . htmlspecialchars($saunaEnergyText) . "</div></div>";
 echo "<div class=\"item\"><div class=\"label\">Other load</div><div class=\"value\">" . htmlspecialchars($otherEnergyText) . "</div></div>";
+echo "<div class=\"item\"><div class=\"label\">Forecast points in selected day</div><div class=\"value\">" . $forecastPointCount . " / " . count($rows) . "</div></div>";
+echo "<div class=\"item\"><div class=\"label\">Selected day MAE</div><div class=\"value\">" . htmlspecialchars($maeText) . "</div></div>";
+echo "<div class=\"item\"><div class=\"label\">Selected day RMSE</div><div class=\"value\">" . htmlspecialchars($rmseText) . "</div></div>";
+echo "<div class=\"item\"><div class=\"label\">Selected day bias</div><div class=\"value\">" . htmlspecialchars($biasText) . "</div></div>";
+echo "<div class=\"item\"><div class=\"label\">Rolling 24h MAE / RMSE</div><div class=\"value\">" . htmlspecialchars($rollingDayMaeText . ' / ' . $rollingDayRmseText) . "</div></div>";
+echo "<div class=\"item\"><div class=\"label\">Rolling 24h bias</div><div class=\"value\">" . htmlspecialchars($rollingDayBiasText) . "</div></div>";
+echo "<div class=\"item\"><div class=\"label\">Rolling 7d MAE / RMSE</div><div class=\"value\">" . htmlspecialchars($rollingWeekMaeText . ' / ' . $rollingWeekRmseText) . "</div></div>";
+echo "<div class=\"item\"><div class=\"label\">Rolling 7d bias</div><div class=\"value\">" . htmlspecialchars($rollingWeekBiasText) . "</div></div>";
 echo "</div>";
 echo "</div>";
 

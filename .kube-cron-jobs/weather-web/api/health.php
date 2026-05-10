@@ -89,7 +89,65 @@ try {
   ];
 }
 
-// 4. ENTSOE prices freshness (should cover current day)
+// 4. Baseline forecast freshness and horizon coverage
+try {
+  $stmt = $pdo->query("WITH latest AS (
+      SELECT run_id, issued_at
+      FROM forecast_run
+      WHERE target = 'baseline_w'
+      ORDER BY issued_at DESC
+      LIMIT 1
+    )
+    SELECT
+      EXTRACT(EPOCH FROM (now() - latest.issued_at))/60 AS age_min,
+      COUNT(*) FILTER (
+        WHERE fv.target_ts >= now()
+          AND fv.target_ts < now() + interval '6 hours'
+      ) AS future_count
+    FROM latest
+    LEFT JOIN forecast_value fv
+      ON fv.run_id = latest.run_id
+     AND fv.target = 'baseline_w'
+    GROUP BY latest.issued_at");
+  $row = $stmt->fetch(PDO::FETCH_ASSOC);
+
+  if (!$row) {
+    $result['overall_status'] = 'error';
+    $result['failures'][] = [
+      'check' => 'baseline_forecast',
+      'status' => 'error',
+      'message' => 'No baseline forecast run found'
+    ];
+  } else {
+    $age_min = (float)$row['age_min'];
+    $future_count = (int)$row['future_count'];
+
+    if ($age_min > 60 || $future_count < 20) {
+      $result['overall_status'] = 'error';
+      $result['failures'][] = [
+        'check' => 'baseline_forecast',
+        'status' => 'error',
+        'message' => sprintf('Baseline forecast unhealthy (%.0f min old, %d/24 slots for next 6h)', $age_min, $future_count)
+      ];
+    } elseif ($age_min > 30 || $future_count < 24) {
+      if ($result['overall_status'] === 'ok') $result['overall_status'] = 'warn';
+      $result['failures'][] = [
+        'check' => 'baseline_forecast',
+        'status' => 'warn',
+        'message' => sprintf('Baseline forecast aging or incomplete (%.0f min old, %d/24 slots for next 6h)', $age_min, $future_count)
+      ];
+    }
+  }
+} catch (Throwable $e) {
+  $result['overall_status'] = 'error';
+  $result['failures'][] = [
+    'check' => 'baseline_forecast',
+    'status' => 'error',
+    'message' => 'Failed to check baseline forecast freshness'
+  ];
+}
+
+// 5. ENTSOE prices freshness (should cover current day)
 try {
   $stmt = $pdo->query("SELECT COUNT(*) AS today_count FROM entsoe_prices WHERE ts >= date_trunc('day', now()) AND ts < date_trunc('day', now()) + interval '1 day'");
   $row = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -112,7 +170,7 @@ try {
   ];
 }
 
-// 5. Backup validity (cross-node safe: read metadata from DB)
+// 6. Backup validity (cross-node safe: read metadata from DB)
 try {
   $stmt = $pdo->query("SELECT EXTRACT(EPOCH FROM (now() - run_ts))/3600 AS age_hours, dump_size_bytes
     FROM backup_runs
@@ -152,7 +210,7 @@ try {
   ];
 }
 
-// 6. Parquet freshness
+// 7. Parquet freshness
 $parquet_dir = '/media/ssd250/weather/exports';
 $parquet_files = glob($parquet_dir . '/weather_fusion_*.parquet');
 if ($parquet_files) {
