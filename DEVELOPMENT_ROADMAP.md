@@ -1,162 +1,153 @@
-# Development Roadmap: Holistic Grid Usage Forecasting
+# Development Roadmap: Home Consumption Components and Baseline Forecasting
 
-This roadmap captures the next implementation steps after the completed PV feed-in forecasting baseline.
+This roadmap captures the accepted next steps for the home-consumption feature set:
 
-## Current Baseline (already implemented)
+- show real consumption and model components in the Home Consumption UI
+- add a weather-based baseline forecaster
+- display forecasted baseline together with actual consumption/components
 
-- PV forecast pipeline (`pv_forecast_baseline.py`) runs every 15 minutes
-- Adaptive PV production window (day-specific start/stop behavior)
-- Forecast storage in PostgreSQL (`forecast_run`, `forecast_value`)
-- Mobile-friendly forecast vs actual page (`/forecast.php`)
-- Kubernetes CronJob automation (`pv-forecast-15min`)
+Obsolete roadmap items related to deferred PV forecaster redesign are removed.
+
+## Current State (already implemented)
+
+- PV forecasting pipeline is operational and stable
+- Home consumption actual series is available via `home_consumption_actual_15min`
+- Home Consumption page exists at `/home-consumption.php`
+- Current Home Consumption UI shows:
+  - `Actual W`
+  - `Base W`
+  - `EV W`
+  - `Sauna W`
 
 ## Goal
 
-Build a holistic forecasting stack that predicts:
+Build a reliable, explainable decomposition and forecasting stack for home consumption where:
 
-- PV production
-- Household consumption (load)
-- Net grid usage (import/export)
+- actual demand is split into actionable components
+- baseline component is forecasted from weather and calendar features
+- UI shows both actual components and forecasted baseline clearly
 
-Then use these forecasts for reliable heating-control decisions.
+## Canonical Power Definition
 
-## Planned Phases
+Assume PCC sign convention:
 
-### Phase 1: Forecast Data Model Extension
+- `active_power_pcc_w > 0`: export
+- `active_power_pcc_w < 0`: import
 
-1. Add support for multiple forecast targets in `forecast_value` usage patterns:
-   - `pv_feed_in_w`
-   - `consumption_w`
-   - `grid_usage_w`
-2. Keep `forecast_run` as shared run metadata table.
-3. Standardize run metadata fields (`model_name`, `model_version`, `issued_at`, `notes`) across all forecast jobs.
-4. Define naming conventions for model versions and notes to track experiments.
+Measured home consumption actual:
 
-Deliverable:
-- Stable schema/query conventions for storing all forecast types side by side.
+- `home_consumption_actual_w = pv_feed_in_w - active_power_pcc_w + bat_discharge_w - bat_charge_w`
 
-### Phase 2: Consumption Forecast Pipeline
+## Target Component Model
 
-1. Define canonical measured power-balance equations (actuals):
-   - Assume `active_power_pcc_w` sign convention: positive = export to grid, negative = import from grid.
-   - `grid_net_w = -active_power_pcc_w` (positive = import, negative = export)
-   - `consumption_actual_w = pv_feed_in_w + bat_discharge_w - bat_charge_w + grid_net_w`
-   - Equivalent form: `consumption_actual_w = pv_feed_in_w - active_power_pcc_w + bat_discharge_w - bat_charge_w`
-2. Derive household consumption forecast target from `consumption_actual_w`.
-3. Build baseline consumption model at 15-minute resolution:
-   - Time-of-day/day-of-week profile baseline
-   - Optional weather sensitivity features (temperature, wind, cloud)
-4. Store p10/p50/p90 forecasts in `forecast_value` with target `consumption_w`.
-5. Add CronJob to run every 15 minutes and write runs to DB.
+Target decomposition per 15-minute timestamp:
 
-Deliverable:
-- Automated consumption forecast runs with metadata and uncertainty bands.
+- `total_actual_w`
+- `baseline_actual_w`
+- `ev_actual_w`
+- `sauna_actual_w`
+- `other_actual_w`
 
-### Phase 3: Net Grid Usage Forecast
+Identity constraint:
 
-1. Compute net grid usage forecast from full power balance (including battery):
-   - `grid_usage_w = consumption_w - pv_feed_in_w - bat_discharge_w + bat_charge_w`
-   - Equivalent relation to PCC measurement target: `grid_usage_w ~= -active_power_pcc_w`
-2. Enforce clear sign convention:
-   - Positive = import from grid
-   - Negative = export to grid
-3. Store grid usage p10/p50/p90 as first-class forecast target.
-4. Validate forecast consistency across components:
-   - `consumption_w ~= pv_feed_in_w + bat_discharge_w - bat_charge_w + grid_usage_w`
-   - `grid_usage_actual_w = -active_power_pcc_w` and compare against modeled `grid_usage_w`
-   - Optional split actuals: `grid_import_actual_w = GREATEST(-active_power_pcc_w, 0)`, `grid_export_actual_w = GREATEST(active_power_pcc_w, 0)`
+- `total_actual_w = baseline_actual_w + ev_actual_w + sauna_actual_w + other_actual_w`
+
+Interpretation:
+
+- `baseline_actual_w`: weather-sensitive, non-discretionary background load
+- `ev_actual_w`: EV charging component (around 6.5 kW excess over baseline)
+- `sauna_actual_w`: sauna component (around 11 kW excess over baseline)
+- `other_actual_w`: discretionary/event residual (dishwasher, laundry, oven, miscellaneous spikes)
+
+## Phased Plan
+
+### Phase 1: Lock Decomposition Contract
+
+1. Create a stable SQL decomposition view for home consumption components.
+2. Ensure the decomposition identity is always satisfied.
+3. Use dependency-safe view recreation order in `create-fusion-view` logic.
 
 Deliverable:
-- End-to-end 24h grid import/export forecast updated every 15 minutes.
 
-### Phase 4: Forecast Evaluation and Monitoring
+- A single source of truth view for component actuals, reusable by UI and forecast training.
 
-1. Extend `forecast.php` to show all three targets (PV, consumption, grid).
-2. Add per-horizon metrics (MAE, RMSE, bias) for each target.
-3. Add rolling performance views in SQL for quick diagnostics.
-4. Add stale-data and failed-run health checks to existing health monitoring.
+### Phase 2: UI for Actual Components
 
-Deliverable:
-- Single monitoring view for model quality and operational status.
-
-### Phase 5: Control Integration (Heating Logic)
-
-1. Define decision features from forecasts:
-   - expected import energy over upcoming intervals
-   - high-price interval overlap
-   - confidence-aware risk flags (using p10/p90)
-2. Implement conservative control policy:
-   - allow/prohibit geothermal usage based on forecasted import cost/risk
-3. Add fail-safe rules:
-   - automatic re-allow timeout
-   - fallback to safe mode when forecast freshness is insufficient
-4. Log each control decision with forecast snapshot and reason code.
+1. Extend `/home-consumption.php` to include all actual components:
+   - actual total
+   - baseline actual
+   - EV actual
+   - sauna actual
+   - other actual
+2. Add daily KPI summaries per component (W and kWh aggregates).
+3. Keep display readable on mobile.
 
 Deliverable:
-- Traceable, forecast-driven heating control with explicit safety constraints.
 
-## Implementation Order for Next Session
+- Home Consumption page explains where total demand comes from at each timestamp.
 
-1. Implement Phase 2 (consumption forecast) end to end.
-2. Implement Phase 3 (grid usage forecast) from modeled components.
-3. Upgrade `forecast.php` for tri-target forecast vs actual.
-4. Add metrics + health checks (Phase 4).
-5. Connect to control decision logic (Phase 5).
+### Phase 3: Baseline Forecast Pipeline
+
+1. Create a baseline forecast script (new target: `baseline_w`).
+2. Train only on `baseline_actual_w` (not total load).
+3. Use weather and calendar features:
+   - temperature
+   - wind speed
+   - cloud cover
+   - shortwave radiation
+   - hour-of-day and day-of-week
+   - weekend/holiday flags
+4. Store runs in existing forecast tables (`forecast_run`, `forecast_value`) with clear metadata.
+5. Schedule via CronJob every 15 minutes.
+
+Deliverable:
+
+- Automated baseline forecast with versioned metadata and uncertainty bands.
+
+### Phase 4: Merge Forecast and Actuals in Home Consumption UI
+
+1. Add forecasted baseline columns to `/home-consumption.php`:
+   - forecast p50 (required)
+   - forecast p10/p90 (optional but recommended)
+2. Show side-by-side baseline actual vs baseline forecast.
+3. Keep EV/sauna/other as actual components initially (event-driven, non-weather first).
+
+Deliverable:
+
+- Unified page showing real consumption, real components, and forecasted baseline.
+
+### Phase 5: Evaluation and Operations
+
+1. Add baseline-specific metrics:
+   - MAE, RMSE, bias
+   - rolling daily and weekly summaries
+2. Add freshness and failure checks for baseline forecast job.
+3. Document model versions, feature set changes, and threshold changes.
+
+Deliverable:
+
+- Operable baseline forecasting system with traceable quality and health.
+
+## Implementation Order
+
+1. Phase 1 (decomposition SQL contract)
+2. Phase 2 (UI components complete)
+3. Phase 3 (baseline forecast job)
+4. Phase 4 (forecasted baseline in UI)
+5. Phase 5 (metrics and health hardening)
 
 ## Done Criteria
 
-The holistic forecasting milestone is complete when:
+This roadmap milestone is complete when all of the following hold:
 
-- All three forecast targets (PV, consumption, grid usage) run automatically every 15 minutes
-- Forecasts are stored with run metadata and uncertainty bands
-- UI shows forecast vs actual and error metrics for all targets
-- Health checks detect stale or failed forecast jobs
-- Control decisions can be traced to concrete forecast evidence
+- Component decomposition is stable and identity-constrained at 15-minute resolution.
+- Home Consumption page shows real total plus all real components.
+- Baseline forecast runs automatically every 15 minutes and is versioned in DB.
+- Home Consumption page shows baseline actual vs baseline forecast.
+- Baseline forecast quality and freshness are monitored.
 
-## Notes for Continuation
+## Notes
 
-- Keep the current PV baseline operational while adding new targets.
-- Prefer incremental deployment and validation (one phase at a time).
-- Preserve backward compatibility in DB queries and UI where possible.
-
-## Deferred Plan: Fixed Nonlinear PV Output Response
-
-Status:
-- Planned only. No changes to running code at this moment.
-- Implementation starts on a clear-sky day so parameters can be tuned against same-day measurements.
-
-Objective:
-- Replace the final linear PV mapping (`yhat = ratio * effective_rad`) with a fixed nonlinear response from effective radiation to output power.
-- Keep the model deterministic and operationally simple after tuning.
-
-Planned model form:
-- `G = effective_rad`
-- `P = P_MAX * (1 - exp(-k * max(G - G0, 0)))^gamma`
-- `P = min(P, P_MAX)`
-
-Where:
-- `G0`: low-radiation deadband (W/m2)
-- `k`: rise-rate parameter
-- `gamma`: curvature/shape parameter
-- `P_MAX`: plant/inverter cap (W)
-
-Implementation scope (when clear day is available):
-1. Add a runtime switch for nonlinear mapping (`FORECAST_USE_NONLINEAR=1`) while keeping current linear path as fallback.
-2. Add nonlinear parameters as env overrides (`FORECAST_NL_G0`, `FORECAST_NL_K`, `FORECAST_NL_GAMMA`, reuse `FORECAST_MAX_PV_W`).
-3. Keep existing effective-radiation pipeline unchanged (cloud factor + panel gain + safety caps).
-4. Write run metadata and notes so nonlinear-vs-linear comparisons are traceable.
-
-Same-day clear-sky tuning plan:
-1. Start from conservative defaults and run forecasts through a full clear-day ramp (morning to afternoon peak).
-2. Tune in order:
-   - `G0` to set near-zero production threshold
-   - `k` to match ramp speed
-   - `gamma` to match shoulder and peak curvature
-3. Validate midday peak alignment against measured `moxa_pv_feed_in_w`.
-4. Confirm no non-physical night output and cap behavior near `P_MAX`.
-
-Acceptance criteria:
-- Midday overprediction is materially reduced on the tuning day and remains improved on subsequent days.
-- Full-day MAE does not regress versus current baseline.
-- Forecast output remains physically plausible (no night leakage, no cap overshoot).
-- Rollback path remains available by switching nonlinear mode off.
+- Keep the PV forecaster operational as-is.
+- Do not mix discretionary event spikes into baseline training target.
+- Prefer incremental deployment and validation phase by phase.
