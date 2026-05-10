@@ -12,12 +12,11 @@ Obsolete roadmap items related to deferred PV forecaster redesign are removed.
 
 - PV forecasting pipeline is operational and stable
 - Home consumption actual series is available via `home_consumption_actual_15min`
+- Home consumption components decomposed via `home_consumption_components_15min` with event continuity detection
 - Home Consumption page exists at `/home-consumption.php`
 - Current Home Consumption UI shows:
-  - `Actual W`
-  - `Base W`
-  - `EV W`
-  - `Sauna W`
+  - `Actual W`, `Base W`, `EV W`, `Sauna W`, `Other W` (per 15-min timestamp)
+  - KPI cards: total energy, baseline energy, EV energy, sauna energy, other energy (daily aggregates)
 
 ## Goal
 
@@ -61,7 +60,7 @@ Interpretation:
 
 ## Phased Plan
 
-### Phase 1: Lock Decomposition Contract
+### Phase 1: Lock Decomposition Contract ✓ DONE
 
 1. Create a stable SQL decomposition view for home consumption components.
 2. Ensure the decomposition identity is always satisfied.
@@ -71,7 +70,9 @@ Deliverable:
 
 - A single source of truth view for component actuals, reusable by UI and forecast training.
 
-### Phase 2: UI for Actual Components
+**Completion Date**: 2026-05-10
+
+### Phase 2: UI for Actual Components ✓ DONE
 
 1. Extend `/home-consumption.php` to include all actual components:
    - actual total
@@ -84,7 +85,11 @@ Deliverable:
 
 Deliverable:
 
-- Home Consumption page explains where total demand comes from at each timestamp.
+- Home Consumption page explains where total demand comes from at each timestamp and daily component energy breakdown.
+
+**Completion Date**: 2026-05-10
+- Event continuity detection: consecutive EV charging slots are now correctly grouped as single event
+- Daily energy KPIs show baseline (33.97 kWh), EV (14.85 kWh), sauna, other loads
 
 ### Phase 3: Baseline Forecast Pipeline
 
