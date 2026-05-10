@@ -1113,6 +1113,78 @@ spec:
               configMap:
                 name: pv-forecast-script
 ---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: baseline-forecast-15min
+  namespace: weather
+spec:
+  schedule: "0,15,30,45 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 1800
+      template:
+        spec:
+          nodeSelector:
+            kubernetes.io/hostname: radxa-b
+          restartPolicy: OnFailure
+          containers:
+            - name: baseline-forecast
+              image: docker.io/library/python:3.11-slim
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: PGHOST
+                  value: weather-postgres
+                - name: PGDATABASE
+                  valueFrom:
+                    secretKeyRef:
+                      name: weather-db
+                      key: MYSQL_DATABASE
+                - name: PGUSER
+                  valueFrom:
+                    secretKeyRef:
+                      name: weather-db
+                      key: MYSQL_USER
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: weather-db
+                      key: MYSQL_PASSWORD
+                - name: TRAIN_DAYS
+                  value: "14"
+                - name: FORECAST_HORIZON_H
+                  value: "48"
+                - name: MODEL_VERSION
+                  value: "baseline-v1"
+                - name: MIN_TRAIN_SAMPLES
+                  value: "50"
+              command:
+                - /bin/bash
+                - -c
+              args:
+                - |
+                  set -e
+                  python -m pip install --no-cache-dir psycopg2-binary scikit-learn numpy
+                  python /opt/forecast/baseline_forecast.py
+              resources:
+                requests:
+                  cpu: "100m"
+                  memory: "256Mi"
+                limits:
+                  cpu: "500m"
+                  memory: "512Mi"
+              volumeMounts:
+                - name: baseline-forecast-script
+                  mountPath: /opt/forecast/baseline_forecast.py
+                  subPath: baseline_forecast.py
+          volumes:
+            - name: baseline-forecast-script
+              configMap:
+                name: baseline-forecast-script
+---
 apiVersion: v1
 kind: Service
 metadata:
