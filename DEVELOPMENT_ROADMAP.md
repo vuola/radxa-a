@@ -17,6 +17,7 @@ Obsolete roadmap items related to deferred PV forecaster redesign are removed.
 - Current Home Consumption UI shows:
   - `Actual W`, `Base W`, `EV W`, `Sauna W`, `Other W` (per 15-min timestamp)
   - KPI cards: total energy, baseline energy, EV energy, sauna energy, other energy (daily aggregates)
+- Baseline consumption forecaster runs every 15 minutes, storing 48-hour forecasts in `forecast_value` table
 
 ## Goal
 
@@ -91,7 +92,30 @@ Deliverable:
 - Event continuity detection: consecutive EV charging slots are now correctly grouped as single event
 - Daily energy KPIs show baseline (33.97 kWh), EV (14.85 kWh), sauna, other loads
 
-### Phase 3: Baseline Forecast Pipeline
+### Phase 3: Baseline Forecast Pipeline ✓ DONE
+
+1. Create a baseline forecast script (new target: `baseline_w`).
+2. Train only on `baseline_actual_w` (not total load).
+3. Use weather and calendar features:
+   - temperature
+   - wind speed
+   - cloud cover
+   - shortwave radiation
+   - hour-of-day and day-of-week
+   - weekend/holiday flags
+4. Store runs in existing forecast tables (`forecast_run`, `forecast_value`) with clear metadata.
+5. Schedule via CronJob every 15 minutes.
+
+Deliverable:
+
+- Automated baseline forecast with versioned metadata and uncertainty bands.
+
+**Completion Date**: 2026-05-10
+- Script: `baseline_forecast.py` (Ridge regression)
+- Training: 1070 samples over 14 days, residual_std=869.4 W
+- Coverage: 48-hour forecast horizon with p10/p50/p90 bands
+- Schedule: Every 15 minutes (0,15,30,45 * * * *)
+- Storage: forecast_run (run_id=4727+), forecast_value with target='baseline_w'
 
 1. Create a baseline forecast script (new target: `baseline_w`).
 2. Train only on `baseline_actual_w` (not total load).
@@ -121,6 +145,8 @@ Deliverable:
 
 - Unified page showing real consumption, real components, and forecasted baseline.
 
+**Status**: Next phase (ready to start)
+
 ### Phase 5: Evaluation and Operations
 
 1. Add baseline-specific metrics:
@@ -132,6 +158,8 @@ Deliverable:
 Deliverable:
 
 - Operable baseline forecasting system with traceable quality and health.
+
+**Status**: Deferred (after Phase 4)
 
 ## Implementation Order
 
@@ -145,11 +173,11 @@ Deliverable:
 
 This roadmap milestone is complete when all of the following hold:
 
-- Component decomposition is stable and identity-constrained at 15-minute resolution.
-- Home Consumption page shows real total plus all real components.
-- Baseline forecast runs automatically every 15 minutes and is versioned in DB.
-- Home Consumption page shows baseline actual vs baseline forecast.
-- Baseline forecast quality and freshness are monitored.
+- ✓ Component decomposition is stable and identity-constrained at 15-minute resolution (Phase 1)
+- ✓ Home Consumption page shows real total plus all real components (Phase 2)
+- ✓ Baseline forecast runs automatically every 15 minutes and is versioned in DB (Phase 3)
+- ⧗ Home Consumption page shows baseline actual vs baseline forecast (Phase 4)
+- ⧗ Baseline forecast quality and freshness are monitored (Phase 5)
 
 ## Notes
 
