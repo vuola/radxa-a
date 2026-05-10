@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import math
 import os
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -11,6 +12,13 @@ from psycopg2.extras import execute_batch
 def read_env(name: str, default: str) -> str:
     value = os.environ.get(name)
     return value if value is not None and value != "" else default
+
+
+def read_schema(name: str, default: str) -> str:
+    value = read_env(name, default)
+    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", value):
+        raise ValueError(f"Invalid schema name for {name}: {value}")
+    return value
 
 
 def align_to_15m(ts: datetime) -> datetime:
@@ -128,6 +136,7 @@ def main() -> int:
     max_pv_w = float(read_env("FORECAST_MAX_PV_W", "41900"))
     model_name = read_env("FORECAST_MODEL_NAME", "pv_radiation_cloud_ratio")
     model_version = read_env("FORECAST_MODEL_VERSION", "v2")
+    source_schema = read_schema("SOURCE_SCHEMA", "public")
 
     # Keep cloud attenuation parameters in sensible bounds.
     cloud_floor = min(max(cloud_floor, 0.0), 1.0)
@@ -184,13 +193,13 @@ def main() -> int:
                 )
 
                 cur.execute(
-                    """
+                                        f"""
                     SELECT
                       ts,
                       moxa_pv_feed_in_w,
                       fc_shortwave_radiation_w_m2,
                       fc_cloud_cover_pct
-                    FROM weather_fusion
+                                        FROM {source_schema}.weather_fusion
                     WHERE ts >= %s::timestamptz
                       AND ts >= now() - (%s || ' days')::interval
                       AND moxa_pv_feed_in_w IS NOT NULL
@@ -266,14 +275,14 @@ def main() -> int:
                             f"panel_tilt_deg={panel_tilt_deg:.1f}, panel_azimuth_deg={panel_azimuth_deg:.1f}, "
                             f"panel_diffuse_floor={panel_diffuse_floor:.2f}, "
                             f"min_solar_elevation_deg={min_solar_elevation_deg:.1f}, "
-                            f"max_pv_w={max_pv_w:.1f}"
+                            f"max_pv_w={max_pv_w:.1f}, source_schema={source_schema}"
                         ),
                     ),
                 )
                 run_id = cur.fetchone()[0]
 
                 cur.execute(
-                    """
+                                        f"""
                                         WITH slots AS (
                                             SELECT generate_series(
                                                 %s::timestamptz,
@@ -286,7 +295,7 @@ def main() -> int:
                                             w.fc_shortwave_radiation_w_m2,
                                             w.fc_cloud_cover_pct
                                         FROM slots s
-                                        LEFT JOIN weather_fusion w ON w.ts = s.target_ts
+                                        LEFT JOIN {source_schema}.weather_fusion w ON w.ts = s.target_ts
                                         ORDER BY s.target_ts ASC;
                     """,
                     (issue_ts, end_ts),

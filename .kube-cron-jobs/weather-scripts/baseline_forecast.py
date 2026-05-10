@@ -6,6 +6,7 @@ Trains on baseline_actual_w using weather and calendar features.
 Generates 15-min forecasts with p10, p50, p90 uncertainty bands.
 """
 import os
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 import warnings
@@ -26,6 +27,13 @@ except ImportError:
 def read_env(name: str, default: str) -> str:
     value = os.environ.get(name)
     return value if value is not None and value != "" else default
+
+
+def read_schema(name: str, default: str) -> str:
+    value = read_env(name, default)
+    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", value):
+        raise ValueError(f"Invalid schema name for {name}: {value}")
+    return value
 
 
 def align_to_15m(ts: datetime) -> datetime:
@@ -106,6 +114,7 @@ def main() -> int:
     model_version = read_env("MODEL_VERSION", "baseline-v1")
     model_name = "baseline_consumption"
     min_train_samples = int(read_env("MIN_TRAIN_SAMPLES", "50"))
+    source_schema = read_schema("SOURCE_SCHEMA", "public")
 
     issue_ts = align_to_15m(datetime.now(timezone.utc))
     cutoff_ts = issue_ts - timedelta(days=train_days)
@@ -149,7 +158,7 @@ def main() -> int:
                                 # Fetch training data: baseline_actual + optional weather features.
                                 # Keep a LEFT JOIN so missing FMI/ENTSOE does not drop all rows.
                 cur.execute(
-                    """
+                                        f"""
                     SELECT
                       c.ts,
                       c.baseline_actual_w,
@@ -157,8 +166,8 @@ def main() -> int:
                       w.fc_wind_speed_ms,
                       w.fc_cloud_cover_pct,
                       w.fc_shortwave_radiation_w_m2
-                    FROM home_consumption_components_15min c
-                    LEFT JOIN weather_fusion w ON c.ts = w.ts
+                                        FROM {source_schema}.home_consumption_components_15min c
+                                        LEFT JOIN {source_schema}.weather_fusion w ON c.ts = w.ts
                     WHERE c.ts >= %s::timestamptz
                       AND c.ts < %s::timestamptz
                       AND c.baseline_actual_w IS NOT NULL
@@ -276,7 +285,8 @@ def main() -> int:
                             f"train_days={train_days}, residual_std={residual_std:.1f}, "
                                                         f"horizon_h={forecast_horizon_h}, defaults_temp={default_temp:.1f}, "
                                                         f"defaults_wind={default_wind:.1f}, defaults_cloud={default_cloud:.1f}, "
-                                                        f"defaults_rad={default_radiation:.1f}, profile_hours={len(hourly_profile)}"
+                            f"defaults_rad={default_radiation:.1f}, profile_hours={len(hourly_profile)}, "
+                            f"source_schema={source_schema}"
                         ),
                     ),
                 )
@@ -284,7 +294,7 @@ def main() -> int:
 
                                 # Fetch forecast weather data on generated slots so ENTSOE gaps still produce rows.
                 cur.execute(
-                    """
+                                        f"""
                                         WITH slots AS (
                                             SELECT generate_series(
                                                 %s::timestamptz,
@@ -299,7 +309,7 @@ def main() -> int:
                                             w.fc_cloud_cover_pct,
                                             w.fc_shortwave_radiation_w_m2
                                         FROM slots s
-                                        LEFT JOIN weather_fusion w ON w.ts = s.target_ts
+                                        LEFT JOIN {source_schema}.weather_fusion w ON w.ts = s.target_ts
                                         ORDER BY s.target_ts ASC;
                     """,
                     (issue_ts, end_ts),
