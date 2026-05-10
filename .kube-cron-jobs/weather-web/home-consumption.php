@@ -44,7 +44,12 @@ $startUtc = $startLocal->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d H:i
 $endUtc = $endLocal->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d H:i:sP');
 
 $stmt = $pdo->prepare(
-  "WITH slots AS (
+  "WITH latest_baseline_run AS (
+     SELECT MAX(run_id) AS run_id
+     FROM forecast_value
+     WHERE target = 'baseline_w'
+   ),
+   slots AS (
      SELECT generate_series(
        :start::timestamptz,
        (:end::timestamptz - interval '15 minutes'),
@@ -55,11 +60,17 @@ $stmt = $pdo->prepare(
      s.target_ts,
      c.home_consumption_actual_w,
      c.baseline_actual_w,
+     fv.yhat_p50 AS baseline_forecast_w,
      c.ev_actual_w,
      c.sauna_actual_w,
      c.other_actual_w
    FROM slots s
    LEFT JOIN home_consumption_components_15min c ON c.ts = s.target_ts
+   LEFT JOIN latest_baseline_run lr ON true
+   LEFT JOIN forecast_value fv
+     ON fv.target_ts = s.target_ts
+    AND fv.target = 'baseline_w'
+    AND fv.run_id = lr.run_id
    ORDER BY s.target_ts ASC"
 );
 $stmt->execute([
@@ -163,16 +174,18 @@ if (!$rows) {
 }
 
 echo "<div class=\"card table-wrap\">";
-echo "<table><thead><tr><th>Time</th><th>Actual W</th><th>Base W</th><th>EV W</th><th>Sauna W</th><th>Other W</th></tr></thead><tbody>";
+echo "<table><thead><tr><th>Time</th><th>Actual W</th><th>Base W</th><th>Base Fcst W</th><th>EV W</th><th>Sauna W</th><th>Other W</th></tr></thead><tbody>";
 foreach ($rows as $row) {
   $tsLocal = (new DateTimeImmutable($row['target_ts']))->setTimezone($tz);
   $actual = $row['home_consumption_actual_w'] !== null ? (float)$row['home_consumption_actual_w'] : null;
   $base = $row['baseline_actual_w'] !== null ? (float)$row['baseline_actual_w'] : null;
+  $baseForecast = $row['baseline_forecast_w'] !== null ? (float)$row['baseline_forecast_w'] : null;
   $ev = $row['ev_actual_w'] !== null ? (float)$row['ev_actual_w'] : null;
   $sauna = $row['sauna_actual_w'] !== null ? (float)$row['sauna_actual_w'] : null;
   $other = $row['other_actual_w'] !== null ? (float)$row['other_actual_w'] : null;
   $actualText = $actual === null ? '-' : number_format($actual, 0, '.', '');
   $baseText = $base === null ? '-' : number_format($base, 0, '.', '');
+  $baseForecastText = $baseForecast === null ? '-' : number_format($baseForecast, 0, '.', '');
   $evText = $ev === null ? '-' : number_format($ev, 0, '.', '');
   $saunaText = $sauna === null ? '-' : number_format($sauna, 0, '.', '');
   $otherText = $other === null ? '-' : number_format($other, 0, '.', '');
@@ -181,6 +194,7 @@ foreach ($rows as $row) {
   echo '<td>' . htmlspecialchars($tsLocal->format('H:i')) . '</td>';
   echo '<td>' . htmlspecialchars($actualText) . '</td>';
   echo '<td>' . htmlspecialchars($baseText) . '</td>';
+  echo '<td>' . htmlspecialchars($baseForecastText) . '</td>';
   echo '<td>' . htmlspecialchars($evText) . '</td>';
   echo '<td>' . htmlspecialchars($saunaText) . '</td>';
   echo '<td>' . htmlspecialchars($otherText) . '</td>';

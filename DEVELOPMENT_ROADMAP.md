@@ -133,7 +133,7 @@ Deliverable:
 
 - Automated baseline forecast with versioned metadata and uncertainty bands.
 
-### Phase 4: Merge Forecast and Actuals in Home Consumption UI
+### Phase 4: Merge Forecast and Actuals in Home Consumption UI ✓ DONE
 
 1. Add forecasted baseline columns to `/home-consumption.php`:
    - forecast p50 (required)
@@ -145,7 +145,9 @@ Deliverable:
 
 - Unified page showing real consumption, real components, and forecasted baseline.
 
-**Status**: Next phase (ready to start)
+**Completion Date**: 2026-05-10
+- UI now shows `Base Fcst W` from the latest `forecast_value` baseline run alongside `Base W`
+- Future slots render forecast-only baseline values when actual component rows are not yet available
 
 ### Phase 5: Evaluation and Operations
 
@@ -159,7 +161,7 @@ Deliverable:
 
 - Operable baseline forecasting system with traceable quality and health.
 
-**Status**: Deferred (after Phase 4)
+**Status**: Next phase
 
 ## Implementation Order
 
@@ -176,7 +178,7 @@ This roadmap milestone is complete when all of the following hold:
 - ✓ Component decomposition is stable and identity-constrained at 15-minute resolution (Phase 1)
 - ✓ Home Consumption page shows real total plus all real components (Phase 2)
 - ✓ Baseline forecast runs automatically every 15 minutes and is versioned in DB (Phase 3)
-- ⧗ Home Consumption page shows baseline actual vs baseline forecast (Phase 4)
+- ✓ Home Consumption page shows baseline actual vs baseline forecast (Phase 4)
 - ⧗ Baseline forecast quality and freshness are monitored (Phase 5)
 
 ## Notes
