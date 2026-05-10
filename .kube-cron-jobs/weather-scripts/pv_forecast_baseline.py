@@ -274,22 +274,24 @@ def main() -> int:
 
                 cur.execute(
                     """
+                                        WITH slots AS (
+                                            SELECT generate_series(
+                                                %s::timestamptz,
+                                                (%s::timestamptz - interval '15 minutes'),
+                                                interval '15 minutes'
+                                            ) AS target_ts
+                                        )
                     SELECT
-                      ts,
-                                            fc_shortwave_radiation_w_m2,
-                                            fc_cloud_cover_pct
-                    FROM weather_fusion
-                    WHERE ts >= %s
-                      AND ts < %s
-                    ORDER BY ts ASC;
+                                            s.target_ts,
+                                            w.fc_shortwave_radiation_w_m2,
+                                            w.fc_cloud_cover_pct
+                                        FROM slots s
+                                        LEFT JOIN weather_fusion w ON w.ts = s.target_ts
+                                        ORDER BY s.target_ts ASC;
                     """,
                     (issue_ts, end_ts),
                 )
                 rows = cur.fetchall()
-
-                if not rows:
-                    print("No weather_fusion rows found for forecast horizon", file=sys.stderr)
-                    return 1
 
                 payload = []
                 for ts, radiation, cloud_cover in rows:

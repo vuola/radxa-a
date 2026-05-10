@@ -28,6 +28,11 @@ def read_env(name: str, default: str) -> str:
     return value if value is not None and value != "" else default
 
 
+def align_to_15m(ts: datetime) -> datetime:
+    aligned_minute = (ts.minute // 15) * 15
+    return ts.replace(minute=aligned_minute, second=0, microsecond=0)
+
+
 def get_time_features(ts: datetime) -> dict:
     """Extract calendar and time-of-day features from a timestamp."""
     ts_utc = ts.astimezone(timezone.utc)
@@ -102,7 +107,7 @@ def main() -> int:
     model_name = "baseline_consumption"
     min_train_samples = int(read_env("MIN_TRAIN_SAMPLES", "50"))
 
-    issue_ts = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    issue_ts = align_to_15m(datetime.now(timezone.utc))
     cutoff_ts = issue_ts - timedelta(days=train_days)
     end_ts = issue_ts + timedelta(hours=forecast_horizon_h)
 
@@ -141,7 +146,8 @@ def main() -> int:
                     """
                 )
 
-                # Fetch training data: baseline_actual + weather features
+                                # Fetch training data: baseline_actual + optional weather features.
+                                # Keep a LEFT JOIN so missing FMI/ENTSOE does not drop all rows.
                 cur.execute(
                     """
                     SELECT
@@ -152,63 +158,103 @@ def main() -> int:
                       w.fc_cloud_cover_pct,
                       w.fc_shortwave_radiation_w_m2
                     FROM home_consumption_components_15min c
-                    JOIN weather_fusion w ON c.ts = w.ts
+                    LEFT JOIN weather_fusion w ON c.ts = w.ts
                     WHERE c.ts >= %s::timestamptz
                       AND c.ts < %s::timestamptz
                       AND c.baseline_actual_w IS NOT NULL
-                      AND w.fc_temperature_c IS NOT NULL
                     ORDER BY c.ts ASC;
                     """,
                     (cutoff_ts, issue_ts),
                 )
                 train_rows = cur.fetchall()
 
-                if len(train_rows) < min_train_samples:
-                    print(
-                        f"Insufficient training samples: {len(train_rows)} < {min_train_samples}",
-                        file=sys.stderr,
-                    )
-                    return 1
+                temp_values = [float(r[2]) for r in train_rows if r[2] is not None]
+                wind_values = [float(r[3]) for r in train_rows if r[3] is not None]
+                cloud_values = [float(r[4]) for r in train_rows if r[4] is not None]
+                radiation_values = [float(r[5]) for r in train_rows if r[5] is not None]
+
+                default_temp = float(np.median(temp_values)) if temp_values else 5.0
+                default_wind = float(np.median(wind_values)) if wind_values else 3.0
+                default_cloud = float(np.median(cloud_values)) if cloud_values else 70.0
+                default_radiation = float(np.median(radiation_values)) if radiation_values else 80.0
 
                 # Build training data
                 X_train = []
                 y_train = []
+                hourly_baseline = {}
                 for ts, baseline_w, temp, wind, cloud, radiation in train_rows:
                     if baseline_w is None or baseline_w < 0:
                         continue
-                    features = build_feature_vector(ts, temp, wind, cloud, radiation)
+                    ts_hel = ts.astimezone(timezone(timedelta(hours=3)))
+                    hour_key = ts_hel.hour
+                    hourly_baseline.setdefault(hour_key, []).append(float(baseline_w))
+
+                    features = build_feature_vector(
+                        ts,
+                        float(temp) if temp is not None else default_temp,
+                        float(wind) if wind is not None else default_wind,
+                        float(cloud) if cloud is not None else default_cloud,
+                        float(radiation) if radiation is not None else default_radiation,
+                    )
                     X_train.append(features)
                     y_train.append(float(baseline_w))
 
                 X_train = np.array(X_train)
                 y_train = np.array(y_train)
 
-                if len(X_train) < min_train_samples:
-                    print(
-                        f"After filtering, insufficient samples: {len(X_train)} < {min_train_samples}",
-                        file=sys.stderr,
+                hourly_profile = {
+                    hour: float(np.mean(values))
+                    for hour, values in hourly_baseline.items()
+                    if values
+                }
+
+                if not hourly_profile:
+                    cur.execute(
+                        """
+                        SELECT
+                          EXTRACT(HOUR FROM target_ts AT TIME ZONE 'Europe/Helsinki')::int AS hour_local,
+                          AVG(yhat_p50)::double precision AS avg_yhat
+                        FROM forecast_value
+                        WHERE target = 'baseline_w'
+                          AND target_ts >= %s::timestamptz - interval '7 days'
+                          AND yhat_p50 IS NOT NULL
+                        GROUP BY 1;
+                        """,
+                        (issue_ts,),
                     )
-                    return 1
+                    for hour_local, avg_yhat in cur.fetchall():
+                        if avg_yhat is not None:
+                            hourly_profile[int(hour_local)] = float(avg_yhat)
 
                 # Train model
+                model_type = "persistence"
                 try:
-                    scaler = StandardScaler()
-                    X_scaled = scaler.fit_transform(X_train)
-                    model = Ridge(alpha=1.0)
-                    model.fit(X_scaled, y_train)
+                    if len(X_train) >= min_train_samples and len(y_train) >= min_train_samples:
+                        scaler = StandardScaler()
+                        X_scaled = scaler.fit_transform(X_train)
+                        model = Ridge(alpha=1.0)
+                        model.fit(X_scaled, y_train)
 
-                    # Estimate residual std (for uncertainty bands)
-                    y_pred_train = model.predict(X_scaled)
-                    residuals = y_train - y_pred_train
-                    residual_std = float(np.std(residuals))
-                    model_type = "ridge_regression"
+                        # Estimate residual std (for uncertainty bands)
+                        y_pred_train = model.predict(X_scaled)
+                        residuals = y_train - y_pred_train
+                        residual_std = float(np.std(residuals))
+                        model_type = "ridge_regression"
+                    else:
+                        model = None
+                        scaler = None
+                        residual_std = float(np.std(y_train)) * 0.3 if len(y_train) > 1 else 700.0
                 except Exception as e:
                     print(f"sklearn training failed: {e}, using persistence model", file=sys.stderr)
                     model = None
                     scaler = None
-                    # Use historical mean at same hour as fallback
-                    model_type = "persistence"
-                    residual_std = float(np.std(y_train)) * 0.3
+                    residual_std = float(np.std(y_train)) * 0.3 if len(y_train) > 1 else 700.0
+
+                if not hourly_profile and len(y_train) > 0:
+                    global_mean = float(np.mean(y_train))
+                    hourly_profile = {h: global_mean for h in range(24)}
+                elif not hourly_profile:
+                    hourly_profile = {h: 2200.0 for h in range(24)}
 
                 # Record run
                 cur.execute(
@@ -228,25 +274,33 @@ def main() -> int:
                         (
                             f"model_type={model_type}, samples={len(X_train)}, "
                             f"train_days={train_days}, residual_std={residual_std:.1f}, "
-                            f"horizon_h={forecast_horizon_h}"
+                                                        f"horizon_h={forecast_horizon_h}, defaults_temp={default_temp:.1f}, "
+                                                        f"defaults_wind={default_wind:.1f}, defaults_cloud={default_cloud:.1f}, "
+                                                        f"defaults_rad={default_radiation:.1f}, profile_hours={len(hourly_profile)}"
                         ),
                     ),
                 )
                 run_id = cur.fetchone()[0]
 
-                # Fetch forecast weather data
+                                # Fetch forecast weather data on generated slots so ENTSOE gaps still produce rows.
                 cur.execute(
                     """
+                                        WITH slots AS (
+                                            SELECT generate_series(
+                                                %s::timestamptz,
+                                                (%s::timestamptz - interval '15 minutes'),
+                                                interval '15 minutes'
+                                            ) AS target_ts
+                                        )
                     SELECT
-                      ts,
-                      fc_temperature_c,
-                      fc_wind_speed_ms,
-                      fc_cloud_cover_pct,
-                      fc_shortwave_radiation_w_m2
-                    FROM weather_fusion
-                    WHERE ts >= %s
-                      AND ts < %s
-                    ORDER BY ts ASC;
+                                            s.target_ts,
+                                            w.fc_temperature_c,
+                                            w.fc_wind_speed_ms,
+                                            w.fc_cloud_cover_pct,
+                                            w.fc_shortwave_radiation_w_m2
+                                        FROM slots s
+                                        LEFT JOIN weather_fusion w ON w.ts = s.target_ts
+                                        ORDER BY s.target_ts ASC;
                     """,
                     (issue_ts, end_ts),
                 )
@@ -259,20 +313,19 @@ def main() -> int:
                 # Generate forecasts
                 payload = []
                 for ts, temp, wind, cloud, radiation in forecast_rows:
-                    features = build_feature_vector(ts, temp, wind, cloud, radiation)
+                    temp_val = float(temp) if temp is not None else default_temp
+                    wind_val = float(wind) if wind is not None else default_wind
+                    cloud_val = float(cloud) if cloud is not None else default_cloud
+                    radiation_val = float(radiation) if radiation is not None else default_radiation
+
+                    features = build_feature_vector(ts, temp_val, wind_val, cloud_val, radiation_val)
 
                     if model is not None:
                         X_scaled = scaler.transform(features.reshape(1, -1))
                         yhat_p50 = float(model.predict(X_scaled)[0])
                     else:
-                        # Persistence: use mean at same hour from training data
-                        hour = ts.astimezone(timezone.utc).hour
-                        hour_samples = [y for t, y in zip(train_rows, y_train)
-                                       if t[0].astimezone(timezone.utc).hour == hour]
-                        if hour_samples:
-                            yhat_p50 = float(np.mean(hour_samples))
-                        else:
-                            yhat_p50 = float(np.mean(y_train))
+                        hour = ts.astimezone(timezone(timedelta(hours=3))).hour
+                        yhat_p50 = float(hourly_profile.get(hour, np.mean(list(hourly_profile.values()))))
 
                     yhat_p50 = max(0.0, yhat_p50)
 
