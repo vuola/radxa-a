@@ -42,3 +42,21 @@ LEFT JOIN fmi_forecast f1 ON date_trunc('hour', e.ts) = f1.ts
 LEFT JOIN fmi_forecast f2 ON date_trunc('hour', e.ts) + interval '1 hour' = f2.ts
 LEFT JOIN moxa_weather_15min m ON e.ts = m.ts
 ORDER BY e.ts;
+
+CREATE OR REPLACE VIEW home_consumption_actual_15min AS
+SELECT
+  ts,
+  GREATEST(
+    0,
+    pv_feed_in_w
+    - active_power_pcc_w
+    + bat_discharge_w
+    - bat_charge_w
+  )::INTEGER AS home_consumption_actual_w
+FROM weather_fusion
+WHERE ts IS NOT NULL
+  AND pv_feed_in_w IS NOT NULL
+  AND active_power_pcc_w IS NOT NULL
+  AND bat_discharge_w IS NOT NULL
+  AND bat_charge_w IS NOT NULL
+ORDER BY ts;

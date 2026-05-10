@@ -488,6 +488,15 @@ sudo chmod 0660 /var/lib/moxa/weather.db
 
 The upload service should run as `www-data` user (matching existing services) or as a dedicated `moxa-backup` user added to `www-data` group. Either approach works; `www-data` is simpler since it's already configured.
 
+On `radxa-a.local`, keep the K3s host config readable to avoid harmless `kubectl` warnings such as `open /etc/rancher/k3s/config.yaml: permission denied`:
+
+```bash
+sudo chown root:root /etc/rancher/k3s/config.yaml
+sudo chmod 0644 /etc/rancher/k3s/config.yaml
+```
+
+If using `.kube-cron-jobs/install-host-config.sh`, ensure it installs the file with mode `0644`.
+
 ### Install commands (run on radxa-a.local)
 
 Copy files to moxa.local:
@@ -1092,6 +1101,24 @@ Page behavior:
 - Forecast values use the newest available run per target timestamp (not only a single latest run).
 - This keeps the daily view complete while actual `moxa_pv_feed_in_w` values fill in over time as measurements arrive.
 - Date switch options: `?date=today`, `?date=tomorrow`, or `?day=YYYY-MM-DD`.
+
+### Home consumption actual UI
+
+A dedicated mobile-focused page is available:
+
+- `http://radxa-a.local/home-consumption.php`
+
+It shows a 15-minute household consumption time series for the selected day.
+
+Page behavior:
+- Uses `home_consumption_actual_15min` view as the source.
+- Shows full-day 15-minute slots (`96` rows) and marks missing points as `-`.
+- Includes compact KPIs (actual point count, missing points, average W, peak W, daily kWh).
+- Date switch options: `?date=today`, `?date=tomorrow`, or `?day=YYYY-MM-DD`.
+
+Consumption signal definition:
+- `home_consumption_actual_w = GREATEST(0, moxa_pv_feed_in_w - moxa_active_power_pcc_w + moxa_bat_discharge_w - moxa_bat_charge_w)`
+- With PCC sign convention: positive `moxa_active_power_pcc_w` means export, negative means import.
 
 ### Manual test and troubleshooting
 

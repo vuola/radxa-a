@@ -25,6 +25,7 @@ generate_weather_web_config() {
     kubectl create configmap weather-web-config \
       --from-file=nginx.conf="$web_files_dir/nginx.conf" \
       --from-file=index.php="$web_files_dir/index.php" \
+      --from-file=home-consumption.php="$web_files_dir/home-consumption.php" \
       --from-file=forecast.php="$web_files_dir/forecast.php" \
       --from-file=export.php="$web_files_dir/export.php" \
       --from-file=ingest.php="$web_files_dir/ingest.php" \

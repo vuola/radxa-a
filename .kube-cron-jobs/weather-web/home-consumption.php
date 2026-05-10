@@ -1,0 +1,154 @@
+<?php
+$readSecret = function(string $path, string $fallback = ''): string {
+  if (is_readable($path)) {
+    return trim((string)file_get_contents($path));
+  }
+  return $fallback;
+};
+
+$host = getenv('DB_HOST') ?: 'weather-postgres';
+$db = getenv('DB_NAME') ?: $readSecret('/var/secret/MYSQL_DATABASE', 'weather');
+$user = getenv('DB_USER') ?: $readSecret('/var/secret/MYSQL_USER', 'weather');
+$pass = getenv('DB_PASS') ?: $readSecret('/var/secret/MYSQL_PASSWORD', '');
+$dsn = "pgsql:host={$host};dbname={$db}";
+
+try {
+  $pdo = new PDO($dsn, $user, $pass, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+} catch (Throwable $e) {
+  http_response_code(500);
+  echo "DB connection failed";
+  exit;
+}
+
+$tz = new DateTimeZone('Europe/Helsinki');
+$nowLocal = new DateTimeImmutable('now', $tz);
+$dateParam = isset($_GET['date']) ? strtolower(trim((string)$_GET['date'])) : '';
+$dayParam = isset($_GET['day']) ? trim((string)$_GET['day']) : '';
+
+if ($dayParam !== '') {
+  $date = DateTimeImmutable::createFromFormat('Y-m-d', $dayParam, $tz);
+  if (!$date) {
+    http_response_code(400);
+    echo "Invalid day format. Use YYYY-MM-DD.";
+    exit;
+  }
+  $startLocal = $date->setTime(0, 0, 0);
+} elseif ($dateParam === 'tomorrow') {
+  $startLocal = $nowLocal->modify('+1 day')->setTime(0, 0, 0);
+} else {
+  $startLocal = $nowLocal->setTime(0, 0, 0);
+}
+
+$endLocal = $startLocal->modify('+1 day');
+$startUtc = $startLocal->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d H:i:sP');
+$endUtc = $endLocal->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d H:i:sP');
+
+$stmt = $pdo->prepare(
+  "WITH slots AS (
+     SELECT generate_series(
+       :start::timestamptz,
+       (:end::timestamptz - interval '15 minutes'),
+       interval '15 minutes'
+     ) AS target_ts
+   )
+   SELECT
+     s.target_ts,
+     h.home_consumption_actual_w
+   FROM slots s
+   LEFT JOIN home_consumption_actual_15min h ON h.ts = s.target_ts
+   ORDER BY s.target_ts ASC"
+);
+$stmt->execute([
+  ':start' => $startUtc,
+  ':end' => $endUtc,
+]);
+$rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+$actualPointCount = 0;
+$missingPointCount = 0;
+$sumW = 0.0;
+$peakW = null;
+foreach ($rows as $row) {
+  if ($row['home_consumption_actual_w'] === null) {
+    $missingPointCount++;
+    continue;
+  }
+  $w = (float)$row['home_consumption_actual_w'];
+  $sumW += $w;
+  $actualPointCount++;
+  if ($peakW === null || $w > $peakW) {
+    $peakW = $w;
+  }
+}
+
+$avgText = $actualPointCount > 0 ? number_format($sumW / $actualPointCount, 0, '.', '') . ' W' : 'n/a';
+$peakText = $peakW !== null ? number_format($peakW, 0, '.', '') . ' W' : 'n/a';
+$energyText = number_format($sumW / 4000.0, 2, '.', '') . ' kWh';
+
+header('Content-Type: text/html; charset=utf-8');
+echo "<!doctype html>";
+echo "<html lang=\"en\"><head><meta charset=\"utf-8\">";
+echo "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">";
+echo "<title>Home Consumption Actual</title>";
+echo "<style>
+:root{--bg:#f5f7fb;--card:#fff;--ink:#101624;--muted:#5f687a;--line:#d9dfeb;--brand:#0f6cbf}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+.wrap{max-width:820px;margin:0 auto;padding:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:10px}
+h1{font-size:1.2rem;margin:.2rem 0 .5rem}
+.meta{color:var(--muted);font-size:.88rem;line-height:1.45}
+.kpi{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}
+.kpi .item{border:1px solid var(--line);border-radius:10px;padding:8px;background:#fafcff}
+.kpi .label{font-size:.75rem;color:var(--muted)}
+.kpi .value{font-size:1rem;font-weight:700}
+a{color:var(--brand);text-decoration:none}
+.tabs{display:flex;gap:12px;flex-wrap:wrap;font-size:.92rem}
+.table-wrap{overflow:auto}
+table{width:100%;border-collapse:collapse;min-width:400px}
+th,td{padding:8px;border-bottom:1px solid var(--line);text-align:right;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.85rem}
+th:first-child,td:first-child{text-align:left;font-family:inherit}
+th{position:sticky;top:0;background:#f2f6ff;z-index:1}
+@media (max-width:560px){
+  .kpi{grid-template-columns:1fr}
+}
+</style>";
+echo "</head><body><div class=\"wrap\">";
+
+echo "<div class=\"card\">";
+echo "<h1>Home Consumption Actual</h1>";
+echo "<div class=\"tabs\"><a href=\"/\">Main dashboard</a><a href=\"?date=today\">Today</a><a href=\"?date=tomorrow\">Tomorrow</a></div>";
+echo "<p class=\"meta\">Date: " . htmlspecialchars($startLocal->format('Y-m-d')) . " (Europe/Helsinki)</p>";
+echo "<p class=\"meta\">Series: household consumption power excluding solar production and battery charging components.</p>";
+
+echo "<div class=\"kpi\">";
+echo "<div class=\"item\"><div class=\"label\">Actual points in selected day</div><div class=\"value\">" . $actualPointCount . " / " . count($rows) . "</div></div>";
+echo "<div class=\"item\"><div class=\"label\">Missing points</div><div class=\"value\">" . $missingPointCount . "</div></div>";
+echo "<div class=\"item\"><div class=\"label\">Average consumption</div><div class=\"value\">" . htmlspecialchars($avgText) . "</div></div>";
+echo "<div class=\"item\"><div class=\"label\">Peak consumption</div><div class=\"value\">" . htmlspecialchars($peakText) . "</div></div>";
+echo "<div class=\"item\"><div class=\"label\">Daily energy from points</div><div class=\"value\">" . htmlspecialchars($energyText) . "</div></div>";
+echo "</div>";
+echo "</div>";
+
+if (!$rows) {
+  echo "<div class=\"card\"><p class=\"meta\">No rows found for this day.</p></div>";
+  echo "</div></body></html>";
+  exit;
+}
+
+echo "<div class=\"card table-wrap\">";
+echo "<table><thead><tr><th>Time</th><th>Actual W</th></tr></thead><tbody>";
+foreach ($rows as $row) {
+  $tsLocal = (new DateTimeImmutable($row['target_ts']))->setTimezone($tz);
+  $actual = $row['home_consumption_actual_w'] !== null ? (float)$row['home_consumption_actual_w'] : null;
+  $actualText = $actual === null ? '-' : number_format($actual, 0, '.', '');
+
+  echo '<tr>';
+  echo '<td>' . htmlspecialchars($tsLocal->format('H:i')) . '</td>';
+  echo '<td>' . htmlspecialchars($actualText) . '</td>';
+  echo '</tr>';
+}
+echo "</tbody></table></div>";
+
+echo "</div></body></html>";
+?>

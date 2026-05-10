@@ -430,6 +430,7 @@ spec:
                 - |
                   set -e
                   psql -c "
+                  DROP VIEW IF EXISTS home_consumption_actual_15min;
                   DROP VIEW IF EXISTS weather_fusion;
                   CREATE OR REPLACE VIEW weather_fusion AS
                   SELECT 
@@ -475,6 +476,24 @@ spec:
                   LEFT JOIN fmi_forecast f2 ON date_trunc('hour', e.ts) + interval '1 hour' = f2.ts
                   LEFT JOIN moxa_weather_15min m ON e.ts = m.ts
                   ORDER BY e.ts;
+
+                  CREATE OR REPLACE VIEW home_consumption_actual_15min AS
+                  SELECT
+                    ts,
+                    GREATEST(
+                      0,
+                      moxa_pv_feed_in_w
+                      - moxa_active_power_pcc_w
+                      + moxa_bat_discharge_w
+                      - moxa_bat_charge_w
+                    )::INTEGER AS home_consumption_actual_w
+                  FROM weather_fusion
+                  WHERE ts IS NOT NULL
+                    AND moxa_pv_feed_in_w IS NOT NULL
+                    AND moxa_active_power_pcc_w IS NOT NULL
+                    AND moxa_bat_discharge_w IS NOT NULL
+                    AND moxa_bat_charge_w IS NOT NULL
+                  ORDER BY ts;
                   "
               resources:
                 requests:
@@ -681,6 +700,8 @@ spec:
             items:
               - key: index.php
                 path: index.php
+              - key: home-consumption.php
+                path: home-consumption.php
               - key: forecast.php
                 path: forecast.php
               - key: export.php
